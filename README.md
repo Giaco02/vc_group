@@ -176,8 +176,3 @@ vmc2_project/
 This project is part of the academic course MEC-E5012 at Aalto University. Not intended for commercial or production use.
 
 ---
-
-```
-
-Let me know if you’d like to customize the README for a specific submission (e.g., include your name, a demo link, or the results).
-```
