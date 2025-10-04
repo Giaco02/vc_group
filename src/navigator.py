@@ -345,21 +345,12 @@ class GridPathFollowerNode(Node):
         self.goal_tol = 0.05
         self.node_tol = 0.05
         # TODO: YOUR CODE HERE: ~3 lines: set the lookahead distance for pure-pursuit based control, and the maximum allowed linear and angular velocities 
-<<<<<<< HEAD
-        self.lookahead_dist = ...
-        self.v_max = ...
-        self.w_max = ...
-        # ...
-        # TODO: YOUR CODE HERE: ~1-2 lines: set your PID controller/s for linear/angular motion
-        self.pid_angular  = PID(kp=..., ki=..., kd=..., i_limit=...)
-=======
         self.lookahead_dist = 0.75
         self.v_max = 1.5
         self.w_max = 2.0
         # ...
         # TODO: YOUR CODE HERE: ~1-2 lines: set your PID controller/s for linear/angular motion
         self.pid_angular = PID(kp=0.8, ki=0.1, kd=0.05, i_limit=1.0)
->>>>>>> 35e2c9f (2/3 checkpoints cleared. robot is scared of narrow corridors.)
 
         # --- Helpers to halt turtlebot ---
         self.dwell_s = 0.5
@@ -526,20 +517,6 @@ class GridPathFollowerNode(Node):
         Returns:
             List of (x, y) waypoints including start_pose and goal_pos.
         """
-<<<<<<< HEAD
-        # TODO: YOUR CODE HERE: ~ 3 lines
-        # 1. Get the closest graph node to the robot’s current starting position (ns)
-        # 2. Get the closest graph node to the goal position (ng)
-        # 3. Run A* to get a path (sequence of graph nodes) from ns → ng
-
-        path: List[Coord] = [start_pose]
-
-        # TODO: YOUR CODE HERE: ~8 lines
-        # 5. If the start node is different from the current robot position, append it to 'path'
-        # 6. Append all waypoints from the A* grid path (avoiding duplicate points)
-        # 7. Ensure the final node (ng) is included
-        # 8. Ensure the actual goal position is included as the last waypoint
-=======
         
         # 1. Get the closest graph node to the robot’s current starting position (ns)
         ns = self.nearest_graph_coord(start_pose)
@@ -568,7 +545,6 @@ class GridPathFollowerNode(Node):
         # 8. Ensure the actual goal position is included as the last waypoint
         if self.goal_pos != path[-1]:
             path.append(self.goal_pos)
->>>>>>> 35e2c9f (2/3 checkpoints cleared. robot is scared of narrow corridors.)
 
         # Return the full planned path as a list of coordinates
         return path
@@ -620,9 +596,6 @@ class GridPathFollowerNode(Node):
         Returns:
             True if passable; False otherwise.
         """
-<<<<<<< HEAD
-        return False
-=======
         if self.scan is None:
             return True
             
@@ -645,7 +618,6 @@ class GridPathFollowerNode(Node):
         min_dist = min(valid_ranges)
         return min_dist >= safety_dist
 
->>>>>>> 35e2c9f (2/3 checkpoints cleared. robot is scared of narrow corridors.)
     
     # --- TODO: YOUR CODE HERE: Implement the function to generate the lookahead point away from obstacles  ---
     def obstacle_avoided_target(self, robot_pos: Coord, seg_dir_yaw: float) -> Coord:
@@ -661,8 +633,6 @@ class GridPathFollowerNode(Node):
         Returns:
             Target (x, y) in world/odom frame.
         """
-<<<<<<< HEAD
-=======
         # 1) Pure-pursuit base target
         base_target = lookahead_point(self.full_path, robot_pos, self.lookahead_dist)
         if self.scan is None:
@@ -722,7 +692,6 @@ class GridPathFollowerNode(Node):
             base_target[1] + lateral_shift * math.sin(perp_yaw)
         )
         
->>>>>>> 35e2c9f (2/3 checkpoints cleared. robot is scared of narrow corridors.)
         return target
     
     # --- TODO: YOUR CODE HERE: controller used for TurtleBot ---
@@ -740,8 +709,6 @@ class GridPathFollowerNode(Node):
         Returns:
             (v_cmd, w_cmd): linear and angular velocity commands.
         """
-<<<<<<< HEAD
-=======
         # Calculate desired heading toward target
         dx = target[0] - robot_pos[0]
         dy = target[1] - robot_pos[1]
@@ -768,7 +735,6 @@ class GridPathFollowerNode(Node):
         
         v_cmd = np.clip(v_cmd, 0.0, self.v_max)
         
->>>>>>> 35e2c9f (2/3 checkpoints cleared. robot is scared of narrow corridors.)
         return v_cmd, w_cmd
 
     # --- Publisher helpers ---
@@ -889,13 +855,6 @@ class GridPathFollowerNode(Node):
         # --- MODE: REPLAN ---
         if self.mode == 'REPLAN':
             self.publish_stop()
-<<<<<<< HEAD
-            # TODO: YOUR CODE HERE: 
-            # ~2 lines: Remove the edge if the edge is blocked 
-            # ~1 line:  Set start_from to the previous node
-            # ~1 line:  Replan the global path from new start point and store it in self.full_path.
-            # ~1 line:  Set the mode back to FOLLOW
-=======
             # TODO: YOUR CODE HERE:
             # Remove the edge if the edge is blocked 
             if self.block_edge is not None:
@@ -909,7 +868,6 @@ class GridPathFollowerNode(Node):
             
             # Set the mode back to FOLLOW
             self._set_mode('FOLLOW')
->>>>>>> 35e2c9f (2/3 checkpoints cleared. robot is scared of narrow corridors.)
             self.draw_scene(robot=robot_position)
             return
 
@@ -917,11 +875,7 @@ class GridPathFollowerNode(Node):
         if self.mode == 'BACKTRACK':
             # TODO: YOUR CODE HERE
             # ~1 line: set a temporary goal as the previous node
-<<<<<<< HEAD
-            temp_goal = ...
-=======
             temp_goal = self.prev_node if self.prev_node is not None else self.full_path[0]
->>>>>>> 35e2c9f (2/3 checkpoints cleared. robot is scared of narrow corridors.)
 
             back_path = [robot_position, temp_goal]
             target = lookahead_point(back_path, robot_position, self.lookahead_dist)
@@ -931,12 +885,9 @@ class GridPathFollowerNode(Node):
 
             # TODO: YOUR CODE HERE: ~3 lines
             # If the distance between the current turtlebot position ('robot') and temp_goal is less than the tolerance ('self.node_tol'), stop the turtlebot immediately and set the mode to REPLAN
-<<<<<<< HEAD
-=======
             if math.dist(robot_position, temp_goal) < self.node_tol:
                 self.publish_stop()
                 self._set_mode('REPLAN')
->>>>>>> 35e2c9f (2/3 checkpoints cleared. robot is scared of narrow corridors.)
             return
 
         # --- MODE: FOLLOW ---
@@ -944,11 +895,6 @@ class GridPathFollowerNode(Node):
         if not self.is_passable(seg_dir_yaw):
             # TODO: YOUR CODE HERE: ~4 lines
             # 1. Stop the turtlebot immediately
-<<<<<<< HEAD
-            # 2. set 'prev_node' to 'ga' 
-            # 3. set 'block_edge' to '(ga, gb)' 
-            # 4. set mode to 'BACKTRACK'
-=======
             self.publish_stop()
             # 2. set 'prev_node' to 'ga'
             self.prev_node = ga
@@ -956,7 +902,6 @@ class GridPathFollowerNode(Node):
             self.block_edge = (ga, gb)
             # 4. set mode to 'BACKTRACK'
             self._set_mode('BACKTRACK')
->>>>>>> 35e2c9f (2/3 checkpoints cleared. robot is scared of narrow corridors.)
             self.draw_scene(robot=robot_position)
             return
             
