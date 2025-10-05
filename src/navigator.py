@@ -346,7 +346,7 @@ class GridPathFollowerNode(Node):
         self.node_tol = 0.05
         # TODO: YOUR CODE HERE: ~3 lines: set the lookahead distance for pure-pursuit based control, and the maximum allowed linear and angular velocities 
         self.lookahead_dist = 0.75
-        self.v_max = 1.5
+        self.v_max = 3.0
         self.w_max = 2.0
         # ...
         # TODO: YOUR CODE HERE: ~1-2 lines: set your PID controller/s for linear/angular motion
@@ -597,27 +597,60 @@ class GridPathFollowerNode(Node):
             True if passable; False otherwise.
         """
         if self.scan is None:
-            return True
-            
-        rel_yaw = angle_wrap(seg_dir_yaw - self.yaw)
-        cone_angle = math.radians(30)   # narrower cone
-        safety_dist = 0.28              # ~2x robot radius
-        
-        angle = self.scan.angle_min
-        valid_ranges = []
-        
-        for r in self.scan.ranges:
-            if self.scan.range_min < r < self.scan.range_max:
-                if abs(angle_wrap(angle - rel_yaw)) < cone_angle:
-                    valid_ranges.append(r)
-            angle += self.scan.angle_increment
-        
-        if not valid_ranges:
-            return True
-        
-        min_dist = min(valid_ranges)
-        return min_dist >= safety_dist
+            return True  # Assume passable if no scan data.
 
+        # Define the angular cone to check for obstacles.
+        cone_angle = math.radians(30)
+
+        # Define the safety distance and minimum passage width.
+        safety_dist = 0.30 # meters
+        min_passable_width = 0.20 # meters
+        robot_radius = 0.079 # meters, from the provided project context
+
+        # Calculate the relative yaw of the path segment.
+        rel_yaw = angle_wrap(seg_dir_yaw - self.yaw)
+
+        # Find all Lidar readings that are within the specified cone.
+        all_readings_in_cone = []
+        angle = self.scan.angle_min
+        for r in self.scan.ranges:
+            if abs(angle_wrap(angle - rel_yaw)) < cone_angle:
+                if self.scan.range_min < r < self.scan.range_max:
+                    all_readings_in_cone.append((angle, r))
+            angle += self.scan.angle_increment
+
+        if not all_readings_in_cone:
+            return True
+
+        # Sort the readings by angle to find the left, right, and middle.
+        all_readings_in_cone.sort(key=lambda x: x[0])
+        
+        # Get the readings from the left, right, and middle of the cone.
+        right_end_reading_dist = all_readings_in_cone[0][1]
+        left_end_reading_dist = all_readings_in_cone[-1][1]
+        
+        middle_index = len(all_readings_in_cone) // 2
+        middle_readings_dists = [r for a, r in all_readings_in_cone[middle_index - 1 : middle_index + 2]]
+
+        # Check if the ends of the cone are blocked and the middle is clear.
+        is_left_blocked = left_end_reading_dist < safety_dist
+        is_right_blocked = right_end_reading_dist < safety_dist
+        is_middle_clear = all(r > safety_dist for r in middle_readings_dists)
+
+        if is_left_blocked and is_right_blocked and is_middle_clear:
+            # Calculate the chord length based on: 2 * r * sin(alpha/2)
+            # r is the radius from the robot's center to the wall
+            r = (left_end_reading_dist + right_end_reading_dist) / 2.0 + robot_radius
+            
+            # Calculate the chord length
+            chord = 2 * r * math.sin(cone_angle / 2.0)
+
+            # If the chord length is sufficient, the passage is passable.
+            return chord > min_passable_width
+        
+        # If the ends are not blocked, check the minimum distance in the entire cone to handle simple obstacles
+        min_distance_in_cone = min([r for a, r in all_readings_in_cone])
+        return min_distance_in_cone >= safety_dist
     
     # --- TODO: YOUR CODE HERE: Implement the function to generate the lookahead point away from obstacles  ---
     def obstacle_avoided_target(self, robot_pos: Coord, seg_dir_yaw: float) -> Coord:
