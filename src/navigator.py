@@ -596,61 +596,67 @@ class GridPathFollowerNode(Node):
         Returns:
             True if passable; False otherwise.
         """
-        if self.scan is None:
-            return True  # Assume passable if no scan data.
 
-        # Define the angular cone to check for obstacles.
-        cone_angle = math.radians(30)
 
-        # Define the safety distance and minimum passage width.
-        safety_dist = 0.30 # meters
-        min_passable_width = 0.20 # meters
-        robot_radius = 0.079 # meters, from the provided project context
+        # front = msg.ranges[0]      # Front (0°)
+        # left = msg.ranges[90]      # Left (90°)
+        # right = msg.ranges[270]    # Right (270°)
+        # back = msg.ranges[180]     # Back (180°)
+        #self.scan
+        rel_yaw = angle_wrap(seg_dir_yaw-self.yaw)
+        rel_yaw = math.degrees(rel_yaw) 
+        if rel_yaw > 0:
+            ref_angle =  360 - rel_yaw
+        elif rel_yaw == 0:
+            ref_angle =0
+        else :
+            ref_angle = -rel_yaw
+        start_angle = (ref_angle - 90)%360
+        end_angle = (ref_angle + 90)%360 
+        start_indx = 0
+        end_indx = 0
+        alpha = 0.05
+        indx_dist_1=0
+        indx_dist_2=0
+        self.get_logger().info(f"start_angle: {start_angle}")
+        self.get_logger().info(f"end_angle: {end_angle}")
+        self.get_logger().info(f"ranges: {len(self.scan.ranges)}")
+        flag=True
 
-        # Calculate the relative yaw of the path segment.
-        rel_yaw = angle_wrap(seg_dir_yaw - self.yaw)
+        if start_angle > end_angle:
+            angles = list(range(int(start_angle), len(self.scan.ranges))) + list(range(0, int(end_angle)))
+        else:
+            angles = list(range(int(start_angle), int(end_angle)))
+        #self.get_logger().info(f"angles: {angles}")
+        for angle in angles:
+            if not(math.isfinite(self.scan.ranges[angle])) or self.scan.ranges[angle] >= 0.25:
+                if flag:
+                    start_indx = angle
+                    flag = False
+                #self.get_logger().info(f"angles difference: {angle_difference_rad}")
+            else:
+                if not flag:
+                    end_indx = angle
+                    flag = True
+            angle_difference_rad = abs(angle_wrap((math.radians(end_indx)-math.radians(start_indx))))
 
-        # Find all Lidar readings that are within the specified cone.
-        all_readings_in_cone = []
-        angle = self.scan.angle_min
-        for r in self.scan.ranges:
-            if abs(angle_wrap(angle - rel_yaw)) < cone_angle:
-                if self.scan.range_min < r < self.scan.range_max:
-                    all_readings_in_cone.append((angle, r))
-            angle += self.scan.angle_increment
-
-        if not all_readings_in_cone:
+        self.get_logger().info(f"1_angle: {indx_dist_1}")
+        self.get_logger().info(f"2_angle: {indx_dist_2}")
+        self.get_logger().info(f"alpha: {alpha}")
+        dist_1 = self.scan.ranges[indx_dist_1]      
+        dist_2 = self.scan.ranges[indx_dist_2]
+        self.get_logger().info(f"l1: {dist_1}")
+        self.get_logger().info(f"l2: {dist_2}")
+        if math.isfinite(dist_1) and math.isfinite(dist_2): 
+            lenght_corridor = math.sqrt(dist_1**2+ dist_2**2 - 2*dist_1*dist_2*math.cos(alpha))
+            self.get_logger().info(f"corridor: {lenght_corridor}")
+            return (lenght_corridor > 0.2)
+        else:
             return True
 
-        # Sort the readings by angle to find the left, right, and middle.
-        all_readings_in_cone.sort(key=lambda x: x[0])
-        
-        # Get the readings from the left, right, and middle of the cone.
-        right_end_reading_dist = all_readings_in_cone[0][1]
-        left_end_reading_dist = all_readings_in_cone[-1][1]
-        
-        middle_index = len(all_readings_in_cone) // 2
-        middle_readings_dists = [r for a, r in all_readings_in_cone[middle_index - 1 : middle_index + 2]]
 
-        # Check if the ends of the cone are blocked and the middle is clear.
-        is_left_blocked = left_end_reading_dist < safety_dist
-        is_right_blocked = right_end_reading_dist < safety_dist
-        is_middle_clear = all(r > safety_dist for r in middle_readings_dists)
 
-        if is_left_blocked and is_right_blocked and is_middle_clear:
-            # Calculate the chord length based on: 2 * r * sin(alpha/2)
-            # r is the radius from the robot's center to the wall
-            r = (left_end_reading_dist + right_end_reading_dist) / 2.0 + robot_radius
-            
-            # Calculate the chord length
-            chord = 2 * r * math.sin(cone_angle / 2.0)
-
-            # If the chord length is sufficient, the passage is passable.
-            return chord > min_passable_width
-        
-        # If the ends are not blocked, check the minimum distance in the entire cone to handle simple obstacles
-        min_distance_in_cone = min([r for a, r in all_readings_in_cone])
-        return min_distance_in_cone >= safety_dist
+    
     
     # --- TODO: YOUR CODE HERE: Implement the function to generate the lookahead point away from obstacles  ---
     def obstacle_avoided_target(self, robot_pos: Coord, seg_dir_yaw: float) -> Coord:
