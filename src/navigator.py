@@ -14,6 +14,7 @@ from sensor_msgs.msg import LaserScan
 from rclpy.parameter import Parameter
 from rcl_interfaces.msg import SetParametersResult
 import sys
+from scipy.spatial import Voronoi, distance
 
 Coord = Tuple[float, float]
 Index = Tuple[int, int]
@@ -586,6 +587,28 @@ class GridPathFollowerNode(Node):
         self.scan = msg
 
     # --- TODO: YOUR CODE HERE: Implement the function to determine passability  ---
+    def has_free_space(self,points, r, seg_yaw,start_angle=None, end_angle=None, boundary_dist=0.05):
+        """
+        Check if there is a free gap >= 2*r between consecutive occupied points in the list,
+        without projecting on any axis. Points are assumed to be in order along the sector.
+        """
+        points = np.array(points, dtype=float)
+
+        # Add fake boundary points at the start/end
+        if start_angle is not None and end_angle is not None:
+            left_x = boundary_dist * math.cos(math.radians(start_angle))
+            left_y = boundary_dist * math.sin(math.radians(start_angle))
+            right_x = boundary_dist * math.cos(math.radians(end_angle))
+            right_y = boundary_dist * math.sin(math.radians(end_angle))
+            fake_points = np.array([[left_x, left_y], [right_x, right_y]])
+        #     # Insert at start and end to keep order along sector
+            points = np.vstack([fake_points[0:1], points, fake_points[1:2]])
+
+        # Compute Euclidean distance between consecutive points
+        gaps = np.linalg.norm(points[1:] - points[:-1], axis=1)
+
+        # Check if any consecutive gap is large enough
+        return np.any(gaps >= 2 * r)
     def is_passable(self, seg_dir_yaw: float) -> bool:
         """
         Decide if the edge between two nodes is passable or not
@@ -611,8 +634,8 @@ class GridPathFollowerNode(Node):
             ref_angle =0
         else :
             ref_angle = -rel_yaw
-        start_angle = (ref_angle - 90)%360
-        end_angle = (ref_angle + 90)%360 
+        start_angle = abs((ref_angle - 90)%360)
+        end_angle = (abs(ref_angle + 90)%360 )
 
         ranges = np.array(self.scan.ranges)
 
@@ -622,121 +645,113 @@ class GridPathFollowerNode(Node):
             angles = list(range(int(start_angle), int(end_angle)))
         selected_ranges = ranges[angles]
 
-        # # Trova indici degli angoli "occupati" (ostacoli)
-        # occupied_mask = np.logical_or(
-        #     np.isfinite(selected_ranges),          # infinito o NaN
-        #     selected_ranges <= 0.25                 # ostacolo troppo vicino
-        # )
-        # occupied_indices = np.where(occupied_mask)[0]  # Indici relativi a 'angles'
+        # free_mask = np.logical_or(
+        #     ~np.isfinite(selected_ranges),
+        #     selected_ranges > 0.4
+        #  )
+        # free_indices = np.where(free_mask)[0]
 
-        # self.get_logger().info(f"Occupied indices (relativi): {occupied_indices}")
-        # if len(occupied_indices) < 2:
-        #     return True
+        # if len(free_indices) == 0:
+        #     return False  # tutto occupato
 
-        # # Trova i due ostacoli più distanti tra loro in angolo
-        # max_gap = 0
-        # idx1, idx2 = 0, 0
-        # for i in range(len(occupied_indices) - 1):
-        #     gap = occupied_indices[i + 1] - occupied_indices[i]
-        #     if gap > max_gap:
-        #         max_gap = gap
-        #         idx1 = occupied_indices[i]
-        #         idx2 = occupied_indices[i + 1]
+        # # Step 2: trova l'intervallo consecutivo più lungo tra punti liberi
+        # max_len = 0
+        # start_idx = end_idx = 0
+        # curr_start = free_indices[0]
 
-        # # Angoli reali (0-359°)
-        # angle1 = angles[idx1]
-        # angle2 = angles[idx2]
+        # for i in range(1, len(free_indices)):
+        #     if free_indices[i] != free_indices[i - 1] + 1:
+        #         curr_len = free_indices[i - 1] - curr_start + 1
+        #         if curr_len > max_len:
+        #             max_len = curr_len
+        #             start_idx = curr_start
+        #             end_idx = free_indices[i - 1]
+        #         curr_start = free_indices[i]
+        # # Verifica l'ultimo intervallo
+        # curr_len = free_indices[-1] - curr_start + 1
+        # if curr_len > max_len:
+        #     start_idx = curr_start
+        #     end_idx = free_indices[-1]
 
-        # # Distanze corrispondenti
+
+        # # Step 3: trova gli ostacoli immediatamente prima e dopo lo spazio libero più grande
+        # # Trova l'ostacolo prima di start_idx
+        # obstacle_before_idx = None
+        # for idx in range(start_idx - 1, -1, -1):
+        #     angle = angles[idx]
+        #     d = ranges[angle]
+        #     if math.isfinite(d) :  # Usa la stessa soglia di occupazione
+        #         obstacle_before_idx = idx
+        #         break
+
+        # # Trova l'ostacolo dopo end_idx
+        # obstacle_after_idx = None
+        # for idx in range(end_idx + 1, len(angles)):
+        #     angle = angles[idx]
+        #     d = ranges[angle]
+        #     if math.isfinite(d):  # Usa la stessa soglia di occupazione
+        #         obstacle_after_idx = idx
+        #         break 
+
+        # # Se non troviamo ostacoli prima/dopo, usa i bordi dello spazio libero
+        # if obstacle_before_idx is None:
+        #     obstacle_before_idx = start_idx
+        # if obstacle_after_idx is None:
+        #     obstacle_after_idx = end_idx
+
+        # # Step 4: ottieni angoli e distanze degli ostacoli ai bordi
+        # angle1 = angles[obstacle_before_idx]
+        # angle2 = angles[obstacle_after_idx]
         # dist1 = ranges[angle1]
         # dist2 = ranges[angle2]
 
-        # self.get_logger().info(f"idx1: {angle1}, dist1: {dist1}")
-        # self.get_logger().info(f"idx2: {angle2}, dist2: {dist2}")
+        # self.get_logger().info(f"Free space indices: {start_idx} to {end_idx}")
+        # self.get_logger().info(f"Obstacle before at index {obstacle_before_idx}, angle: {angle1}, dist: {dist1}")
+        # self.get_logger().info(f"Obstacle after at index {obstacle_after_idx}, angle: {angle2}, dist: {dist2}")
 
         # if not (math.isfinite(dist1) and math.isfinite(dist2)):
-        #     return True  # Se una distanza è infinita, consideriamo passabile
+        #     return True
 
-        # # Calcola alpha: differenza angolare in radianti
         # alpha_deg = abs(angle1 - angle2)
         # if alpha_deg > 180:
         #     alpha_deg = 360 - alpha_deg
         # alpha_rad = math.radians(alpha_deg)
 
-        # self.get_logger().info(f"Alpha (deg): {alpha_deg}, Alpha (rad): {alpha_rad}")
-
-        # # Legge del coseno per calcolare distanza tra i due ostacoli
         # corridor_length = math.sqrt(
         #     dist1**2 + dist2**2 - 2 * dist1 * dist2 * math.cos(alpha_rad)
         # )
 
         # self.get_logger().info(f"Corridor length: {corridor_length:.3f}")
+        # return corridor_length > 0.25
+        # seleziona solo i punti OCCUPATI (distanze finite e minori di una soglia)
+        occupied_mask = np.isfinite(selected_ranges) & (selected_ranges < self.lookahead_dist)
+        occupied_indices = np.where(occupied_mask)[0]
 
-        # # Soglia minima per considerare il corridoio "passabile"
-        # return corridor_length > 0.2
-        free_mask = np.logical_or(
-            ~np.isfinite(selected_ranges),
-            selected_ranges > 0.4
-         )
-        free_indices = np.where(free_mask)[0]
-
-        if len(free_indices) == 0:
-            return False  # tutto occupato
-
-        # Step 2: trova l'intervallo consecutivo più lungo tra punti liberi
-        max_len = 0
-        start_idx = end_idx = 0
-        curr_start = free_indices[0]
-        for i in range(1, len(free_indices)):
-            if free_indices[i] != free_indices[i - 1] + 1:
-                curr_len = free_indices[i - 1] - curr_start + 1
-                if curr_len > max_len:
-                    max_len = curr_len
-                    start_idx = curr_start
-                    end_idx = free_indices[i - 1]
-                curr_start = free_indices[i]
-
-        # Verifica l'ultimo intervallo
-        curr_len = free_indices[-1] - curr_start + 1
-        if curr_len > max_len:
-            start_idx = curr_start
-            end_idx = free_indices[-1]
-
-        # Step 3: trova gli angoli reali corrispondenti
-        angle1 = angles[start_idx]
-        angle2 = angles[end_idx]
-
-        # Step 4: cerca i punti occupati più vicini a questi bordi (per misurare distanza reale)
-        def find_nearest_obstacle(angle):
-            # Cerca nei ±5° gradi attorno per trovare un ostacolo vicino
-            search_range = [(angle + offset) % 360 for offset in range(-5, 6)]
-            for a in search_range:
-                d = ranges[a]
-                if math.isfinite(d) and d <= 0.25:
-                    return a, d
-            return angle, ranges[angle]  # se non trovi niente, usa valore originale
-
-        angle1, dist1 = find_nearest_obstacle(angle1)
-        angle2, dist2 = find_nearest_obstacle(angle2)
-
-        self.get_logger().info(f"Edge angles: {angle1}, {angle2}")
-        self.get_logger().info(f"Distances: {dist1}, {dist2}")
-
-        if not (math.isfinite(dist1) and math.isfinite(dist2)):
+        # se non ci sono punti occupati, allora è tutto libero
+        if len(occupied_indices) == 0:
+            self.get_logger().info("Nessun ostacolo nel settore: spazio libero.")
             return True
 
-        alpha_deg = abs(angle1 - angle2)
-        if alpha_deg > 180:
-            alpha_deg = 360 - alpha_deg
-        alpha_rad = math.radians(alpha_deg)
+        # proietta i punti occupati nel piano 2D
+        occupied_points = []
+        for idx in occupied_indices:
+            angle_deg = angles[idx]
+            dist = selected_ranges[idx]
+            theta = math.radians(angle_deg)
+            x = dist * math.cos(theta)
+            y = dist * math.sin(theta)
+            occupied_points.append((x, y))
 
-        corridor_length = math.sqrt(
-            dist1**2 + dist2**2 - 2 * dist1 * dist2 * math.cos(alpha_rad)
-        )
+        # se meno di 3 punti, consideriamo percorribile
+        if len(occupied_points) < 3:
+            self.get_logger().info("Pochi ostacoli nel settore: percorribile.")
+            return True
 
-        self.get_logger().info(f"Corridor length: {corridor_length:.3f}")
-        return corridor_length > 0.4
+        # usa la funzione geometrica per verificare spazio libero
+        free = self.has_free_space(occupied_points, 0.1, seg_dir_yaw,start_angle, end_angle)
 
+        self.get_logger().info(f"Settore {start_angle:.1f}°,{end_angle:.1f}° | punti occupati: {len(occupied_points)} | passabile: {free}")
+        return free
 
 
     
@@ -835,28 +850,51 @@ class GridPathFollowerNode(Node):
         dx = target[0] - robot_pos[0]
         dy = target[1] - robot_pos[1]
         desired_heading = math.atan2(dy, dx)
-        
         # Calculate heading error
         heading_error = angle_wrap(desired_heading - robot_h)
-        
+
+        total_left = 0.0
+        count_left = 0
+        for i in range(0, 45):
+            if math.isfinite(self.scan.ranges[i]):
+                total_left += self.scan.ranges[i]
+                count_left += 1
+
+        total_right = 0.0
+        count_right = 0
+        for i in range(315, 360):
+            if math.isfinite(self.scan.ranges[i]):
+                total_right += self.scan.ranges[i]
+                count_right += 1
+
+        if count_left > 0:
+            avg_left = total_left / count_left
+        else:
+            avg_left = float('inf')
+
+        if count_right > 0:
+            avg_right = total_right / count_right
+        else:
+            avg_right = float('inf')
+
+
+        if avg_left != float('inf') and avg_right != float('inf') and (avg_right - avg_left)> 0.3:
+            error = avg_right - avg_left
+            a=0.4
+            heading_error = a*heading_error+(1-a)*error
         # Angular control using PID
         w_cmd = self.pid_angular.update(heading_error, dt)
         w_cmd = np.clip(w_cmd, -self.w_max, self.w_max)
-        
         # Linear control - reduce speed when turning sharply
         distance_to_target = math.dist(robot_pos, target)
-        v_base = min(self.v_max, distance_to_target * 0.5)  # Base speed
-        
+        v_base = min(self.v_max, distance_to_target * 0.5) # Base speed
         # Slow down when making sharp turns
         turn_factor = 1.0 - min(1.0, abs(heading_error) / (math.pi/2))
         v_cmd = v_base * turn_factor
-        
         # Further reduce speed if very close to target
         if distance_to_target < 0.1:
             v_cmd *= distance_to_target / 0.1
-        
-        v_cmd = np.clip(v_cmd, 0.0, self.v_max)
-        
+            v_cmd = np.clip(v_cmd, 0.0, self.v_max)
         return v_cmd, w_cmd
 
     # --- Publisher helpers ---
