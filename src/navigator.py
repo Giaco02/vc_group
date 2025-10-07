@@ -345,9 +345,9 @@ class GridPathFollowerNode(Node):
         self.goal_tol = 0.05
         self.node_tol = 0.05
         # TODO: YOUR CODE HERE: ~3 lines: set the lookahead distance for pure-pursuit based control, and the maximum allowed linear and angular velocities 
-        self.lookahead_dist = 0.75
+        self.lookahead_dist = 0.7
         self.v_max = 3.0
-        self.w_max = 2.0
+        self.w_max = 2.5
         # ...
         # TODO: YOUR CODE HERE: ~1-2 lines: set your PID controller/s for linear/angular motion
         self.pid_angular = PID(kp=0.8, ki=0.1, kd=0.05, i_limit=1.0)
@@ -365,6 +365,7 @@ class GridPathFollowerNode(Node):
         self.x = 0.0; self.y = 0.0; self.yaw = 0.0 # turtlebot pose 
         self.scan: Optional[LaserScan] = None      # stores the latest scan
         self.mode = 'None'                         # operation mode 
+        self.alignment_target_yaw: Optional[float] = None  # For ALIGN mode
         self.last_t = self._now()
 
         # --- Grid (5x5) ---
@@ -586,151 +587,204 @@ class GridPathFollowerNode(Node):
         self.scan = msg
 
     # --- TODO: YOUR CODE HERE: Implement the function to determine passability  ---
+    # Conservative navigation functions for maze-like environments
+
+    # ============================================================================
+    # IMPROVED is_passable - More conservative passage detection
+    # ============================================================================
     def is_passable(self, seg_dir_yaw: float) -> bool:
         """
         Decide if the edge between two nodes is passable or not
-
         Args:
             seg_dir_yaw: segment heading in world/odom frame (radians).
-
         Returns:
             True if passable; False otherwise.
         """
         if self.scan is None:
             return True  # Assume passable if no scan data.
 
-        # Define the angular cone to check for obstacles.
-        cone_angle = math.radians(30)
+        # Parameters for obstacle detection
+        cone_angle = math.radians(30)  # Cone to check ahead
+        critical_dist = 0.45  # INCREASED - detect obstacles further away
+        safety_dist = 0.30  
+        min_passage_width = 0.22
+        robot_diameter = 0.158
 
-        # Define the safety distance and minimum passage width.
-        safety_dist = 0.30 # meters
-        min_passable_width = 0.20 # meters
-        robot_radius = 0.079 # meters, from the provided project context
-
-        # Calculate the relative yaw of the path segment.
+        # Calculate the relative yaw of the path segment
         rel_yaw = angle_wrap(seg_dir_yaw - self.yaw)
 
-        # Find all Lidar readings that are within the specified cone.
-        all_readings_in_cone = []
+        # Collect ALL readings in the forward cone with their positions
+        obstacle_points = []
         angle = self.scan.angle_min
+
         for r in self.scan.ranges:
-            if abs(angle_wrap(angle - rel_yaw)) < cone_angle:
+            ang_diff = angle_wrap(angle - rel_yaw)
+            if abs(ang_diff) <= cone_angle:
                 if self.scan.range_min < r < self.scan.range_max:
-                    all_readings_in_cone.append((angle, r))
+                    # Convert to robot frame
+                    x_r = r * math.cos(angle)
+                    y_r = r * math.sin(angle)
+
+                    # Rotate to path-aligned frame
+                    x_seg = math.cos(rel_yaw) * x_r + math.sin(rel_yaw) * y_r
+                    y_seg = -math.sin(rel_yaw) * x_r + math.cos(rel_yaw) * y_r
+
+                    obstacle_points.append((x_seg, y_seg, r))
+
             angle += self.scan.angle_increment
 
-        if not all_readings_in_cone:
-            return True
+        if not obstacle_points:
+            return True  # No obstacles detected
 
-        # Sort the readings by angle to find the left, right, and middle.
-        all_readings_in_cone.sort(key=lambda x: x[0])
-        
-        # Get the readings from the left, right, and middle of the cone.
-        right_end_reading_dist = all_readings_in_cone[0][1]
-        left_end_reading_dist = all_readings_in_cone[-1][1]
-        
-        middle_index = len(all_readings_in_cone) // 2
-        middle_readings_dists = [r for a, r in all_readings_in_cone[middle_index - 1 : middle_index + 2]]
+        # Check for any close obstacle in path
+        min_dist = min(pt[2] for pt in obstacle_points)
 
-        # Check if the ends of the cone are blocked and the middle is clear.
-        is_left_blocked = left_end_reading_dist < safety_dist
-        is_right_blocked = right_end_reading_dist < safety_dist
-        is_middle_clear = all(r > safety_dist for r in middle_readings_dists)
+        # CRITICAL: If anything is close, be more careful
+        if min_dist < critical_dist:
+            # Separate by sides
+            left_points = [pt for pt in obstacle_points if pt[1] > 0.03]
+            right_points = [pt for pt in obstacle_points if pt[1] < -0.03]
+            center_points = [pt for pt in obstacle_points if abs(pt[1]) <= 0.03]
 
-        if is_left_blocked and is_right_blocked and is_middle_clear:
-            # Calculate the chord length based on: 2 * r * sin(alpha/2)
-            # r is the radius from the robot's center to the wall
-            r = (left_end_reading_dist + right_end_reading_dist) / 2.0 + robot_radius
-            
-            # Calculate the chord length
-            chord = 2 * r * math.sin(cone_angle / 2.0)
+            # Check for center blockage (like a ball directly in path)
+            if center_points:
+                center_min_dist = min(pt[2] for pt in center_points)
+                if center_min_dist < safety_dist:
+                    # Something directly blocking the path
+                    self.get_logger().info(f"Center blockage detected at {center_min_dist:.2f}m")
+                    return False
 
-            # If the chord length is sufficient, the passage is passable.
-            return chord > min_passable_width
-        
-        # If the ends are not blocked, check the minimum distance in the entire cone to handle simple obstacles
-        min_distance_in_cone = min([r for a, r in all_readings_in_cone])
-        return min_distance_in_cone >= safety_dist
-    
-    # --- TODO: YOUR CODE HERE: Implement the function to generate the lookahead point away from obstacles  ---
+            # Check if it's a narrow corridor
+            if left_points and right_points:
+                left_min = min(abs(pt[1]) for pt in left_points)
+                right_min = min(abs(pt[1]) for pt in right_points)
+                corridor_width = left_min + right_min
+
+                required_width = robot_diameter + min_passage_width
+
+                if corridor_width < required_width:
+                    self.get_logger().info(f"Corridor too narrow: {corridor_width:.2f}m < {required_width:.2f}m")
+                    return False
+
+                # Wide enough corridor
+                return True
+
+            # Obstacle on one side only
+            if left_points or right_points:
+                side_min = min_dist
+                if side_min < safety_dist:
+                    # Check if there's enough room on the other side
+                    if left_points and not right_points:
+                        # Obstacle on left, check if we can pass on right
+                        return True  # Assume passable
+                    elif right_points and not left_points:
+                        # Obstacle on right, check if we can pass on left
+                        return True
+
+            # Default: if something close and unclear, be cautious
+            if min_dist < safety_dist * 0.8:
+                return False
+
+        return True  # Far enough, passable
+
+
+    # == ==========================================================================
+    # IMPROVED obstacle_avoided_target - With alignment awareness
+    # ============================================================================
     def obstacle_avoided_target(self, robot_pos: Coord, seg_dir_yaw: float) -> Coord:
         """
         Generate a target point that accounts for obstacle avoidance:
         - Pure-pursuit base target at lookahead distance along the path.
-        - Lateral shift inside the road corridor to increase clearance.
+        - Gentle lateral shift to center in corridors.
+
+        NOTE: This function now assumes the robot is already aligned with seg_dir_yaw
+        at the start of each segment (handled by control_step alignment mode).
 
         Args:
             robot_pos: current turtlebot position (x, y) in odom/world frame.
             seg_dir_yaw: segment heading in world/odom frame (radians).
-
         Returns:
             Target (x, y) in world/odom frame.
         """
         # 1) Pure-pursuit base target
         base_target = lookahead_point(self.full_path, robot_pos, self.lookahead_dist)
+
         if self.scan is None:
             return base_target
-            
+
         # 2) Segment direction relative to robot heading
         seg_dir_rel = angle_wrap(seg_dir_yaw - self.yaw)
-        
+
         # Parameters
-        front_cone = math.radians(50)   # look ±50° around path direction
-        x_min_ahead = 0.05              # ignore points very near the robot
-        x_max_ahead = 1.2 * self.lookahead_dist
-        safety_threshold = 0.25         # start shifting if wall closer than this (m)
-        max_shift = 0.06                # maximum lateral offset (m)
-        
+        front_cone = math.radians(35)
+        x_min_ahead = 0.08
+        x_max_ahead = 1.0 * self.lookahead_dist
+        safety_threshold = 0.28
+        max_shift = 0.04  # Even gentler
+
         angle_min = self.scan.angle_min
         angle_inc = self.scan.angle_increment
         ranges = self.scan.ranges
-        
-        left_vals, right_vals = [], []
-        
-        # 3) Project scan points into segment frame
+
+        left_vals = []
+        right_vals = []
+
+        # 3) Project scan points
         for i, r in enumerate(ranges):
             if not (self.scan.range_min < r < self.scan.range_max):
                 continue
+            
             beam_angle = angle_min + i * angle_inc
             ang_diff = angle_wrap(beam_angle - seg_dir_rel)
+
             if abs(ang_diff) > front_cone:
                 continue
+            
             # Point in robot frame
             x_r = r * math.cos(beam_angle)
             y_r = r * math.sin(beam_angle)
+
             # Rotate into segment-aligned frame
             x_seg = math.cos(seg_dir_rel) * x_r + math.sin(seg_dir_rel) * y_r
             y_seg = -math.sin(seg_dir_rel) * x_r + math.cos(seg_dir_rel) * y_r
+
             if x_min_ahead <= x_seg <= x_max_ahead:
                 if y_seg > 0:
                     left_vals.append(y_seg)
                 elif y_seg < 0:
                     right_vals.append(-y_seg)
-        
-        # 4) Take robust minima (ignore inf if no values)
+
+        # 4) Calculate clearances
         left_clear = min(left_vals) if left_vals else float("inf")
         right_clear = min(right_vals) if right_vals else float("inf")
-        
-        # 5) Decide lateral shift
+
+        # 5) Gentle centering
         lateral_shift = 0.0
+
         if left_clear < safety_threshold or right_clear < safety_threshold:
             diff = left_clear - right_clear
-            diff_norm = max(-1.0, min(1.0, diff / safety_threshold))
+            diff_norm = max(-1.0, min(1.0, diff / (safety_threshold * 1.5)))
             lateral_shift = diff_norm * max_shift
-            
-        # 6) Apply shift perpendicular to segment direction in world frame
+
+        # 6) Apply shift
         perp_yaw = seg_dir_yaw + math.pi / 2.0
         target = (
             base_target[0] + lateral_shift * math.cos(perp_yaw),
             base_target[1] + lateral_shift * math.sin(perp_yaw)
         )
-        
+
         return target
-    
-    # --- TODO: YOUR CODE HERE: controller used for TurtleBot ---
-    def turtlebot_control(self, robot_pos: Coord, robot_h: float, target: Coord, dt: float, Ld: float) -> Tuple[float, float]:
+
+
+    # ============================================================================
+    # IMPROVED turtlebot_control - Supports alignment mode
+    # ============================================================================
+    def turtlebot_control(self, robot_pos: Coord, robot_h: float, target: Coord, 
+                          dt: float, Ld: float) -> Tuple[float, float]:
         """
-        Compute (v, w) commands that blend pure-pursuit with PID:
+        Compute (v, w) commands with conservative speed control.
+
+        When in alignment mode, only rotates to face the target without moving forward.
 
         Args:
             robot_pos: current pose (x, y) in odom/world frame.
@@ -738,7 +792,6 @@ class GridPathFollowerNode(Node):
             target: target point (x, y) to track.
             dt: timestep (s).
             Ld: pure-pursuit lookahead distance (m).
-
         Returns:
             (v_cmd, w_cmd): linear and angular velocity commands.
         """
@@ -746,28 +799,43 @@ class GridPathFollowerNode(Node):
         dx = target[0] - robot_pos[0]
         dy = target[1] - robot_pos[1]
         desired_heading = math.atan2(dy, dx)
-        
+
         # Calculate heading error
         heading_error = angle_wrap(desired_heading - robot_h)
-        
-        # Angular control using PID
+
+        # === ANGULAR CONTROL ===
         w_cmd = self.pid_angular.update(heading_error, dt)
         w_cmd = np.clip(w_cmd, -self.w_max, self.w_max)
-        
-        # Linear control - reduce speed when turning sharply
+
+        # === LINEAR CONTROL ===
         distance_to_target = math.dist(robot_pos, target)
-        v_base = min(self.v_max, distance_to_target * 0.5)  # Base speed
-        
-        # Slow down when making sharp turns
-        turn_factor = 1.0 - min(1.0, abs(heading_error) / (math.pi/2))
-        v_cmd = v_base * turn_factor
-        
-        # Further reduce speed if very close to target
-        if distance_to_target < 0.1:
-            v_cmd *= distance_to_target / 0.1
-        
-        v_cmd = np.clip(v_cmd, 0.0, self.v_max)
-        
+
+        # Check if we're in alignment mode (stored in self.mode)
+        # If mode contains 'ALIGN', only rotate, don't move forward
+        if hasattr(self, 'mode') and 'ALIGN' in self.mode:
+            # Pure rotation mode
+            v_cmd = 0.0
+        else:
+            # Normal navigation mode
+            # Conservative base speed
+            v_base = min(self.v_max * 0.35, distance_to_target * 1.5)  # Even slower: 35%
+
+            # Slow down when turning
+            turn_factor = 1.0 - min(1.0, abs(heading_error) / (math.pi / 3))
+            turn_factor = max(0.15, turn_factor)  # Min 15% speed
+
+            v_cmd = v_base * turn_factor
+
+            # Slow down near waypoints
+            if distance_to_target < 0.2:
+                v_cmd *= distance_to_target / 0.2
+
+            # Stop if facing very wrong direction
+            if abs(heading_error) > math.radians(70):
+                v_cmd = 0.0
+
+            v_cmd = np.clip(v_cmd, 0.0, self.v_max)
+
         return v_cmd, w_cmd
 
     # --- Publisher helpers ---
@@ -831,6 +899,19 @@ class GridPathFollowerNode(Node):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 20, 20), 2)
         img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
         cv2.imshow(self.win, img); cv2.waitKey(1)
+
+    def is_aligned_with_segment(self, seg_dir_yaw: float, tolerance: float = math.radians(15)) -> bool:
+        """
+        Check if the robot is aligned with the desired segment direction.
+        
+        Args:
+            seg_dir_yaw: desired heading in world/odom frame (radians).
+            tolerance: angular tolerance in radians (default 15 degrees).
+        Returns:
+            True if aligned within tolerance, False otherwise.
+        """
+        heading_error = abs(angle_wrap(seg_dir_yaw - self.yaw))
+        return heading_error < tolerance
     
     # --- Main control loop ----
     def control_step(self):
@@ -923,21 +1004,58 @@ class GridPathFollowerNode(Node):
                 self._set_mode('REPLAN')
             return
 
-        # --- MODE: FOLLOW ---
-        # React if an obstacle has become non-passable
-        if not self.is_passable(seg_dir_yaw):
-            # TODO: YOUR CODE HERE: ~4 lines
-            # 1. Stop the turtlebot immediately
-            self.publish_stop()
-            # 2. set 'prev_node' to 'ga'
-            self.prev_node = ga
-            # 3. set 'block_edge' to '(ga, gb)'
-            self.block_edge = (ga, gb)
-            # 4. set mode to 'BACKTRACK'
-            self._set_mode('BACKTRACK')
-            self.draw_scene(robot=robot_position)
+        # --- MODE: ALIGN (add this BEFORE FOLLOW mode) ---
+        if self.mode == 'ALIGN':
+            # Rotate in place to face the segment direction
+            target_yaw = self.alignment_target_yaw if self.alignment_target_yaw is not None else seg_dir_yaw
+
+            # Create a virtual target point in the desired direction
+            align_dist = 0.5  # meters ahead
+            target = (
+                robot_position[0] + align_dist * math.cos(target_yaw),
+                robot_position[1] + align_dist * math.sin(target_yaw)
+            )
+
+            # Get control commands (will be rotation only due to ALIGN mode check)
+            v_cmd, w_cmd = self.turtlebot_control(robot_position, robot_heading, target, dt, self.lookahead_dist)
+            self.publish_cmd(v_cmd, w_cmd)
+            self.draw_scene(robot=robot_position, target=target)
+
+            # Check if aligned now
+            if self.is_aligned_with_segment(target_yaw, tolerance=math.radians(8)):
+                self.get_logger().info("Alignment complete, resuming FOLLOW")
+                self._set_mode('FOLLOW')
+
             return
-            
+
+    # --- MODE: FOLLOW (modified) ---
+        if self.mode == 'FOLLOW':
+            # First check: Are we aligned with the segment direction?
+            if not self.is_aligned_with_segment(seg_dir_yaw, tolerance=math.radians(12)):
+                # NOT ALIGNED - Enter alignment mode
+                self.publish_stop()
+                self._set_mode('ALIGN')
+                self.alignment_target_yaw = seg_dir_yaw
+                self.get_logger().info(f"Entering ALIGN mode, target: {math.degrees(seg_dir_yaw):.1f}°, current: {math.degrees(self.yaw):.1f}°")
+                self.draw_scene(robot=robot_position)
+                return
+
+            # Second check: Is the path ahead passable?
+            if not self.is_passable(seg_dir_yaw):
+                self.publish_stop()
+                self.prev_node = ga
+                self.block_edge = (ga, gb)
+                self._set_mode('BACKTRACK')
+                self.draw_scene(robot=robot_position)
+                return
+
+            # All clear - proceed with normal following
+            target = self.obstacle_avoided_target(robot_position, seg_dir_yaw)
+            v_cmd, w_cmd = self.turtlebot_control(robot_position, robot_heading, target, dt, self.lookahead_dist)
+            self.publish_cmd(v_cmd, w_cmd)
+            self.draw_scene(robot=robot_position, target=target)
+            return
+
         target = self.obstacle_avoided_target(robot_position, seg_dir_yaw) # Get obstacle avoided lookahead target point
         v_cmd, w_cmd = self.turtlebot_control(robot_position, robot_heading, target, dt, self.lookahead_dist) # Get linear and angular velocity values from your control block
         self.publish_cmd(v_cmd, w_cmd) # publish the velocities
