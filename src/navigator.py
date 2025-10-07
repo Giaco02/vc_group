@@ -613,46 +613,129 @@ class GridPathFollowerNode(Node):
             ref_angle = -rel_yaw
         start_angle = (ref_angle - 90)%360
         end_angle = (ref_angle + 90)%360 
-        start_indx = 0
-        end_indx = 0
-        alpha = 0.05
-        indx_dist_1=0
-        indx_dist_2=0
-        self.get_logger().info(f"start_angle: {start_angle}")
-        self.get_logger().info(f"end_angle: {end_angle}")
-        self.get_logger().info(f"ranges: {len(self.scan.ranges)}")
-        flag=True
+
+        ranges = np.array(self.scan.ranges)
 
         if start_angle > end_angle:
             angles = list(range(int(start_angle), len(self.scan.ranges))) + list(range(0, int(end_angle)))
         else:
             angles = list(range(int(start_angle), int(end_angle)))
-        #self.get_logger().info(f"angles: {angles}")
-        for angle in angles:
-            if not(math.isfinite(self.scan.ranges[angle])) or self.scan.ranges[angle] >= 0.25:
-                if flag:
-                    start_indx = angle
-                    flag = False
-                #self.get_logger().info(f"angles difference: {angle_difference_rad}")
-            else:
-                if not flag:
-                    end_indx = angle
-                    flag = True
-            angle_difference_rad = abs(angle_wrap((math.radians(end_indx)-math.radians(start_indx))))
+        selected_ranges = ranges[angles]
 
-        self.get_logger().info(f"1_angle: {indx_dist_1}")
-        self.get_logger().info(f"2_angle: {indx_dist_2}")
-        self.get_logger().info(f"alpha: {alpha}")
-        dist_1 = self.scan.ranges[indx_dist_1]      
-        dist_2 = self.scan.ranges[indx_dist_2]
-        self.get_logger().info(f"l1: {dist_1}")
-        self.get_logger().info(f"l2: {dist_2}")
-        if math.isfinite(dist_1) and math.isfinite(dist_2): 
-            lenght_corridor = math.sqrt(dist_1**2+ dist_2**2 - 2*dist_1*dist_2*math.cos(alpha))
-            self.get_logger().info(f"corridor: {lenght_corridor}")
-            return (lenght_corridor > 0.2)
-        else:
+        # # Trova indici degli angoli "occupati" (ostacoli)
+        # occupied_mask = np.logical_or(
+        #     np.isfinite(selected_ranges),          # infinito o NaN
+        #     selected_ranges <= 0.25                 # ostacolo troppo vicino
+        # )
+        # occupied_indices = np.where(occupied_mask)[0]  # Indici relativi a 'angles'
+
+        # self.get_logger().info(f"Occupied indices (relativi): {occupied_indices}")
+        # if len(occupied_indices) < 2:
+        #     return True
+
+        # # Trova i due ostacoli più distanti tra loro in angolo
+        # max_gap = 0
+        # idx1, idx2 = 0, 0
+        # for i in range(len(occupied_indices) - 1):
+        #     gap = occupied_indices[i + 1] - occupied_indices[i]
+        #     if gap > max_gap:
+        #         max_gap = gap
+        #         idx1 = occupied_indices[i]
+        #         idx2 = occupied_indices[i + 1]
+
+        # # Angoli reali (0-359°)
+        # angle1 = angles[idx1]
+        # angle2 = angles[idx2]
+
+        # # Distanze corrispondenti
+        # dist1 = ranges[angle1]
+        # dist2 = ranges[angle2]
+
+        # self.get_logger().info(f"idx1: {angle1}, dist1: {dist1}")
+        # self.get_logger().info(f"idx2: {angle2}, dist2: {dist2}")
+
+        # if not (math.isfinite(dist1) and math.isfinite(dist2)):
+        #     return True  # Se una distanza è infinita, consideriamo passabile
+
+        # # Calcola alpha: differenza angolare in radianti
+        # alpha_deg = abs(angle1 - angle2)
+        # if alpha_deg > 180:
+        #     alpha_deg = 360 - alpha_deg
+        # alpha_rad = math.radians(alpha_deg)
+
+        # self.get_logger().info(f"Alpha (deg): {alpha_deg}, Alpha (rad): {alpha_rad}")
+
+        # # Legge del coseno per calcolare distanza tra i due ostacoli
+        # corridor_length = math.sqrt(
+        #     dist1**2 + dist2**2 - 2 * dist1 * dist2 * math.cos(alpha_rad)
+        # )
+
+        # self.get_logger().info(f"Corridor length: {corridor_length:.3f}")
+
+        # # Soglia minima per considerare il corridoio "passabile"
+        # return corridor_length > 0.2
+        free_mask = np.logical_or(
+            ~np.isfinite(selected_ranges),
+            selected_ranges > 0.4
+         )
+        free_indices = np.where(free_mask)[0]
+
+        if len(free_indices) == 0:
+            return False  # tutto occupato
+
+        # Step 2: trova l'intervallo consecutivo più lungo tra punti liberi
+        max_len = 0
+        start_idx = end_idx = 0
+        curr_start = free_indices[0]
+        for i in range(1, len(free_indices)):
+            if free_indices[i] != free_indices[i - 1] + 1:
+                curr_len = free_indices[i - 1] - curr_start + 1
+                if curr_len > max_len:
+                    max_len = curr_len
+                    start_idx = curr_start
+                    end_idx = free_indices[i - 1]
+                curr_start = free_indices[i]
+
+        # Verifica l'ultimo intervallo
+        curr_len = free_indices[-1] - curr_start + 1
+        if curr_len > max_len:
+            start_idx = curr_start
+            end_idx = free_indices[-1]
+
+        # Step 3: trova gli angoli reali corrispondenti
+        angle1 = angles[start_idx]
+        angle2 = angles[end_idx]
+
+        # Step 4: cerca i punti occupati più vicini a questi bordi (per misurare distanza reale)
+        def find_nearest_obstacle(angle):
+            # Cerca nei ±5° gradi attorno per trovare un ostacolo vicino
+            search_range = [(angle + offset) % 360 for offset in range(-5, 6)]
+            for a in search_range:
+                d = ranges[a]
+                if math.isfinite(d) and d <= 0.25:
+                    return a, d
+            return angle, ranges[angle]  # se non trovi niente, usa valore originale
+
+        angle1, dist1 = find_nearest_obstacle(angle1)
+        angle2, dist2 = find_nearest_obstacle(angle2)
+
+        self.get_logger().info(f"Edge angles: {angle1}, {angle2}")
+        self.get_logger().info(f"Distances: {dist1}, {dist2}")
+
+        if not (math.isfinite(dist1) and math.isfinite(dist2)):
             return True
+
+        alpha_deg = abs(angle1 - angle2)
+        if alpha_deg > 180:
+            alpha_deg = 360 - alpha_deg
+        alpha_rad = math.radians(alpha_deg)
+
+        corridor_length = math.sqrt(
+            dist1**2 + dist2**2 - 2 * dist1 * dist2 * math.cos(alpha_rad)
+        )
+
+        self.get_logger().info(f"Corridor length: {corridor_length:.3f}")
+        return corridor_length > 0.4
 
 
 
