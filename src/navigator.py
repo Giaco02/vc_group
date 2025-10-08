@@ -345,12 +345,13 @@ class GridPathFollowerNode(Node):
         self.goal_tol = 0.05
         self.node_tol = 0.05
         # TODO: YOUR CODE HERE: ~3 lines: set the lookahead distance for pure-pursuit based control, and the maximum allowed linear and angular velocities 
-        self.lookahead_dist = 0.7
-        self.v_max = 3.0
-        self.w_max = 2.5
+        self.lookahead_dist = 0.5
+        self.v_max = 0.35
+        self.w_max = 1.2
         # ...
         # TODO: YOUR CODE HERE: ~1-2 lines: set your PID controller/s for linear/angular motion
-        self.pid_angular = PID(kp=0.8, ki=0.1, kd=0.05, i_limit=1.0)
+        self.pid_angular = PID(kp=1.0, ki=0.0, kd=0.05, i_limit=0.5)
+        self.pid_linear = PID(kp=0.5, ki=0.0, kd=0.0, i_limit=0.2)
 
         # --- Helpers to halt turtlebot ---
         self.dwell_s = 0.5
@@ -784,16 +785,7 @@ class GridPathFollowerNode(Node):
         """
         Compute (v, w) commands with conservative speed control.
 
-        When in alignment mode, only rotates to face the target without moving forward.
-
-        Args:
-            robot_pos: current pose (x, y) in odom/world frame.
-            robot_h: current heading (yaw angle) in the odom/world frame.
-            target: target point (x, y) to track.
-            dt: timestep (s).
-            Ld: pure-pursuit lookahead distance (m).
-        Returns:
-            (v_cmd, w_cmd): linear and angular velocity commands.
+        When in alignment mode, allow slow forward motion to avoid getting stuck.
         """
         # Calculate desired heading toward target
         dx = target[0] - robot_pos[0]
@@ -809,32 +801,27 @@ class GridPathFollowerNode(Node):
 
         # === LINEAR CONTROL ===
         distance_to_target = math.dist(robot_pos, target)
+        aligning = hasattr(self, 'mode') and 'ALIGN' in self.mode
 
-        # Check if we're in alignment mode (stored in self.mode)
-        # If mode contains 'ALIGN', only rotate, don't move forward
-        if hasattr(self, 'mode') and 'ALIGN' in self.mode:
-            # Pure rotation mode
+        # Base forward speed (allow small creep in ALIGN to avoid getting stuck)
+        v_base = min(
+            self.v_max * (0.18 if aligning else 0.35),
+            max(0.0, distance_to_target) * (1.0 if aligning else 1.5)
+        )
+
+        # Slow down when turning; never drop below 10% of v_base
+        turn_factor = max(0.1, 1.0 - abs(heading_error) / (math.pi / 2.0))
+        v_cmd = v_base * turn_factor
+
+        # Slow down near the target
+        if distance_to_target < 0.25:
+            v_cmd *= distance_to_target / 0.25
+
+        # Only hard-stop if almost facing the opposite direction
+        if abs(heading_error) > math.radians(140):
             v_cmd = 0.0
-        else:
-            # Normal navigation mode
-            # Conservative base speed
-            v_base = min(self.v_max * 0.35, distance_to_target * 1.5)  # Even slower: 35%
 
-            # Slow down when turning
-            turn_factor = 1.0 - min(1.0, abs(heading_error) / (math.pi / 3))
-            turn_factor = max(0.15, turn_factor)  # Min 15% speed
-
-            v_cmd = v_base * turn_factor
-
-            # Slow down near waypoints
-            if distance_to_target < 0.2:
-                v_cmd *= distance_to_target / 0.2
-
-            # Stop if facing very wrong direction
-            if abs(heading_error) > math.radians(70):
-                v_cmd = 0.0
-
-            v_cmd = np.clip(v_cmd, 0.0, self.v_max)
+        v_cmd = float(np.clip(v_cmd, 0.0, self.v_max))
 
         return v_cmd, w_cmd
 
