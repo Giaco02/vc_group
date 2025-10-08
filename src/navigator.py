@@ -597,60 +597,76 @@ class GridPathFollowerNode(Node):
             True if passable; False otherwise.
         """
         if self.scan is None:
-            return True  # Assume passable if no scan data.
-
-        # Define the angular cone to check for obstacles.
-        cone_angle = math.radians(30)
-
-        # Define the safety distance and minimum passage width.
-        safety_dist = 0.30 # meters
-        min_passable_width = 0.20 # meters
-        robot_radius = 0.079 # meters, from the provided project context
-
-        # Calculate the relative yaw of the path segment.
-        rel_yaw = angle_wrap(seg_dir_yaw - self.yaw)
-
-        # Find all Lidar readings that are within the specified cone.
-        all_readings_in_cone = []
-        angle = self.scan.angle_min
-        for r in self.scan.ranges:
-            if abs(angle_wrap(angle - rel_yaw)) < cone_angle:
-                if self.scan.range_min < r < self.scan.range_max:
-                    all_readings_in_cone.append((angle, r))
-            angle += self.scan.angle_increment
-
-        if not all_readings_in_cone:
+            self.get_logger().warn("No LIDAR data yet — assuming path is passable.")
             return True
 
-        # Sort the readings by angle to find the left, right, and middle.
-        all_readings_in_cone.sort(key=lambda x: x[0])
-        
-        # Get the readings from the left, right, and middle of the cone.
-        right_end_reading_dist = all_readings_in_cone[0][1]
-        left_end_reading_dist = all_readings_in_cone[-1][1]
-        
-        middle_index = len(all_readings_in_cone) // 2
-        middle_readings_dists = [r for a, r in all_readings_in_cone[middle_index - 1 : middle_index + 2]]
+        # --- Parameters ---
+        dist_thresh = 0.6          # distance (m) to consider a hit (obstacle)
+        min_corridor = 0.3         # minimum gap width robot can fit through (m)
+        robot_width = 0.178         # TurtleBot3 width (m)
+        sector_half_angle = math.radians(45)  # angular window (±45° around path direction)
 
-        # Check if the ends of the cone are blocked and the middle is clear.
-        is_left_blocked = left_end_reading_dist < safety_dist
-        is_right_blocked = right_end_reading_dist < safety_dist
-        is_middle_clear = all(r > safety_dist for r in middle_readings_dists)
+        # --- Extract LIDAR data ---
+        angle_min = self.scan.angle_min
+        angle_max = self.scan.angle_max
+        angle_inc = self.scan.angle_increment
+        ranges = np.array(self.scan.ranges)
+        n = len(ranges)
 
-        if is_left_blocked and is_right_blocked and is_middle_clear:
-            # Calculate the chord length based on: 2 * r * sin(alpha/2)
-            # r is the radius from the robot's center to the wall
-            r = (left_end_reading_dist + right_end_reading_dist) / 2.0 + robot_radius
-            
-            # Calculate the chord length
-            chord = 2 * r * math.sin(cone_angle / 2.0)
+        # --- Compute relative yaw ---
+        # LIDAR frame is robot-relative; seg_dir_yaw is world-relative.
+        rel_yaw = angle_wrap(seg_dir_yaw - self.yaw)
+        center_angle = rel_yaw
+        left_bound = center_angle - sector_half_angle
+        right_bound = center_angle + sector_half_angle
 
-            # If the chord length is sufficient, the passage is passable.
-            return chord > min_passable_width
-        
-        # If the ends are not blocked, check the minimum distance in the entire cone to handle simple obstacles
-        min_distance_in_cone = min([r for a, r in all_readings_in_cone])
-        return min_distance_in_cone >= safety_dist
+        # Convert angles to indices
+        left_idx = int(max(0, (left_bound - angle_min) / angle_inc))
+        right_idx = int(min(n - 1, (right_bound - angle_min) / angle_inc))
+        if left_idx >= right_idx:
+            self.get_logger().warn("Invalid LIDAR sector bounds — assuming safe.")
+            return True
+
+        sector_ranges = ranges[left_idx:right_idx]
+        sector_angles = np.linspace(left_bound, right_bound, len(sector_ranges))
+
+        # --- Detect obstacle hits ---
+        hits = np.where(sector_ranges < dist_thresh)[0]
+        if len(hits) == 0:
+            self.get_logger().debug("No obstacles detected in sector — passable.")
+            return True
+
+        mid_idx = len(sector_ranges) // 2
+        left_hits = hits[hits < mid_idx]
+        right_hits = hits[hits > mid_idx]
+
+        if len(left_hits) == 0 or len(right_hits) == 0:
+            self.get_logger().debug("Open space on one side — passable.")
+            return True
+
+        # --- Last hit on the left, first hit on the right ---
+        left_hit_idx = left_hits[-1]
+        right_hit_idx = right_hits[0]
+        d1 = sector_ranges[left_hit_idx]
+        d2 = sector_ranges[right_hit_idx]
+        d_angle = abs(sector_angles[right_hit_idx] - sector_angles[left_hit_idx])
+
+        # --- Compute corridor width (Law of Cosines) ---
+        width = math.sqrt(max(0.0, d1**2 + d2**2 - 2 * d1 * d2 * math.cos(d_angle)))
+
+        # --- Decision ---
+        passable = width > max(min_corridor, robot_width)
+
+        # --- Logging ---
+        self.get_logger().info(
+            f"[is_passable] Sector ±{math.degrees(sector_half_angle):.1f}°, "
+            f"width={width:.3f} m, "
+            f"d1={d1:.3f}, d2={d2:.3f}, Δθ={math.degrees(d_angle):.1f}°, "
+            f"passable={passable}"
+        )
+
+        return passable
+
     
     # --- TODO: YOUR CODE HERE: Implement the function to generate the lookahead point away from obstacles  ---
     def obstacle_avoided_target(self, robot_pos: Coord, seg_dir_yaw: float) -> Coord:
