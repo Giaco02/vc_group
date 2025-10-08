@@ -595,17 +595,18 @@ class GridPathFollowerNode(Node):
         points = np.array(points, dtype=float)
 
         # Add fake boundary points at the start/end
-        if start_angle is not None and end_angle is not None:
-            left_x = boundary_dist * math.cos(math.radians(start_angle))
-            left_y = boundary_dist * math.sin(math.radians(start_angle))
-            right_x = boundary_dist * math.cos(math.radians(end_angle))
-            right_y = boundary_dist * math.sin(math.radians(end_angle))
-            fake_points = np.array([[left_x, left_y], [right_x, right_y]])
+        # if start_angle is not None and end_angle is not None:
+        #     left_x = boundary_dist * math.cos(math.radians(start_angle))
+        #     left_y = boundary_dist * math.sin(math.radians(start_angle))
+        #     right_x = boundary_dist * math.cos(math.radians(end_angle))
+        #     right_y = boundary_dist * math.sin(math.radians(end_angle))
+        #     fake_points = np.array([[left_x, left_y], [right_x, right_y]])
         #     # Insert at start and end to keep order along sector
-            points = np.vstack([fake_points[0:1], points, fake_points[1:2]])
+        #     points = np.vstack([fake_points[0:1], points, fake_points[1:2]])
 
         # Compute Euclidean distance between consecutive points
         gaps = np.linalg.norm(points[1:] - points[:-1], axis=1)
+        self.get_logger().info(f"gaps {max(gaps)}")
 
         # Check if any consecutive gap is large enough
         return np.any(gaps >= 2 * r)
@@ -634,8 +635,8 @@ class GridPathFollowerNode(Node):
             ref_angle =0
         else :
             ref_angle = -rel_yaw
-        start_angle = abs((ref_angle - 90)%360)
-        end_angle = (abs(ref_angle + 90)%360 )
+        start_angle = abs((ref_angle - 110)%360)
+        end_angle = (abs(ref_angle + 110)%360 )
 
         ranges = np.array(self.scan.ranges)
 
@@ -724,8 +725,9 @@ class GridPathFollowerNode(Node):
         # self.get_logger().info(f"Corridor length: {corridor_length:.3f}")
         # return corridor_length > 0.25
         # seleziona solo i punti OCCUPATI (distanze finite e minori di una soglia)
-        occupied_mask = np.isfinite(selected_ranges) & (selected_ranges < self.lookahead_dist)
+        occupied_mask = np.isfinite(selected_ranges) #& (selected_ranges < self.lookahead_dist)
         occupied_indices = np.where(occupied_mask)[0]
+        self.get_logger().info(f"seg dir: {rel_yaw } | ref angle: {ref_angle}")
 
         # se non ci sono punti occupati, allora è tutto libero
         if len(occupied_indices) == 0:
@@ -750,7 +752,7 @@ class GridPathFollowerNode(Node):
         # usa la funzione geometrica per verificare spazio libero
         free = self.has_free_space(occupied_points, 0.1, seg_dir_yaw,start_angle, end_angle)
 
-        self.get_logger().info(f"Settore {start_angle:.1f}°,{end_angle:.1f}° | punti occupati: {len(occupied_points)} | passabile: {free}")
+        # self.get_logger().info(f"Settore {start_angle:.1f}°,{end_angle:.1f}° | punti occupati: {len(occupied_points)} | passabile: {free}")
         return free
 
 
@@ -853,35 +855,35 @@ class GridPathFollowerNode(Node):
         # Calculate heading error
         heading_error = angle_wrap(desired_heading - robot_h)
 
-        total_left = 0.0
-        count_left = 0
-        for i in range(0, 45):
-            if math.isfinite(self.scan.ranges[i]):
-                total_left += self.scan.ranges[i]
-                count_left += 1
+        # total_left = 0.0
+        # count_left = 0
+        # for i in range(0, 45):
+        #     if math.isfinite(self.scan.ranges[i]):
+        #         total_left += self.scan.ranges[i]
+        #         count_left += 1
 
-        total_right = 0.0
-        count_right = 0
-        for i in range(315, 360):
-            if math.isfinite(self.scan.ranges[i]):
-                total_right += self.scan.ranges[i]
-                count_right += 1
+        # total_right = 0.0
+        # count_right = 0
+        # for i in range(315, 360):
+        #     if math.isfinite(self.scan.ranges[i]):
+        #         total_right += self.scan.ranges[i]
+        #         count_right += 1
 
-        if count_left > 0:
-            avg_left = total_left / count_left
-        else:
-            avg_left = float('inf')
+        # if count_left > 0:
+        #     avg_left = total_left / count_left
+        # else:
+        #     avg_left = float('inf')
 
-        if count_right > 0:
-            avg_right = total_right / count_right
-        else:
-            avg_right = float('inf')
+        # if count_right > 0:
+        #     avg_right = total_right / count_right
+        # else:
+        #     avg_right = float('inf')
 
 
-        if avg_left != float('inf') and avg_right != float('inf') and (avg_right - avg_left)> 0.3:
-            error = avg_right - avg_left
-            a=0.4
-            heading_error = a*heading_error+(1-a)*error
+        # if avg_left != float('inf') and avg_right != float('inf') and (avg_right - avg_left)> 0.3:
+        #     error = avg_right - avg_left
+        #     a=0.4
+        #     heading_error = a*heading_error+(1-a)*error
         # Angular control using PID
         w_cmd = self.pid_angular.update(heading_error, dt)
         w_cmd = np.clip(w_cmd, -self.w_max, self.w_max)
