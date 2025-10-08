@@ -343,7 +343,7 @@ class GridPathFollowerNode(Node):
 
         # --- Motion and geometry parameters ---
         self.goal_tol = 0.05
-        self.node_tol = 0.05
+        self.node_tol = 0.1
         # TODO: YOUR CODE HERE: ~3 lines: set the lookahead distance for pure-pursuit based control, and the maximum allowed linear and angular velocities 
         self.lookahead_dist = 0.75
         self.v_max = 3.0
@@ -602,9 +602,9 @@ class GridPathFollowerNode(Node):
 
         # --- Parameters ---
         dist_thresh = 0.6          # distance (m) to consider a hit (obstacle)
-        min_corridor = 0.3         # minimum gap width robot can fit through (m)
+        min_corridor = 0.25        # minimum gap width robot can fit through (m)
         robot_width = 0.178         # TurtleBot3 width (m)
-        sector_half_angle = math.radians(45)  # angular window (±45° around path direction)
+        sector_half_angle = math.radians(30)  # angular window (±45° around path direction)
 
         # --- Extract LIDAR data ---
         angle_min = self.scan.angle_min
@@ -682,67 +682,69 @@ class GridPathFollowerNode(Node):
         Returns:
             Target (x, y) in world/odom frame.
         """
-        # 1) Pure-pursuit base target
-        base_target = lookahead_point(self.full_path, robot_pos, self.lookahead_dist)
+        # front = msg.ranges[0]      # Front (0°)
+        # left = msg.ranges[90]      # Left (90°)
+        # right = msg.ranges[270]    # Right (270°)
+        # back = msg.ranges[180]     # Back (180°)
+
+        # If no scan data is available, just fall back to pure-pursuit behavior
         if self.scan is None:
-            return base_target
-            
-        # 2) Segment direction relative to robot heading
-        seg_dir_rel = angle_wrap(seg_dir_yaw - self.yaw)
-        
-        # Parameters
-        front_cone = math.radians(50)   # look ±50° around path direction
-        x_min_ahead = 0.05              # ignore points very near the robot
-        x_max_ahead = 1.2 * self.lookahead_dist
-        safety_threshold = 0.25         # start shifting if wall closer than this (m)
-        max_shift = 0.06                # maximum lateral offset (m)
-        
+            return lookahead_point(self.full_path, robot_pos, self.lookahead_dist)
+
+        # --- PARAMETERS ---
+        base_lookahead = self.lookahead_dist         # default lookahead distance
+        min_lookahead = 0.05 * base_lookahead         # shortest lookahead when obstacles are close
+        max_shift = 0.3                             # maximum lateral shift (m)
+        safety_threshold = 0.5                       # distance where avoidance starts (m)
         angle_min = self.scan.angle_min
         angle_inc = self.scan.angle_increment
         ranges = self.scan.ranges
-        
-        left_vals, right_vals = [], []
-        
-        # 3) Project scan points into segment frame
-        for i, r in enumerate(ranges):
-            if not (self.scan.range_min < r < self.scan.range_max):
-                continue
-            beam_angle = angle_min + i * angle_inc
-            ang_diff = angle_wrap(beam_angle - seg_dir_rel)
-            if abs(ang_diff) > front_cone:
-                continue
-            # Point in robot frame
-            x_r = r * math.cos(beam_angle)
-            y_r = r * math.sin(beam_angle)
-            # Rotate into segment-aligned frame
-            x_seg = math.cos(seg_dir_rel) * x_r + math.sin(seg_dir_rel) * y_r
-            y_seg = -math.sin(seg_dir_rel) * x_r + math.cos(seg_dir_rel) * y_r
-            if x_min_ahead <= x_seg <= x_max_ahead:
-                if y_seg > 0:
-                    left_vals.append(y_seg)
-                elif y_seg < 0:
-                    right_vals.append(-y_seg)
-        
-        # 4) Take robust minima (ignore inf if no values)
-        left_clear = min(left_vals) if left_vals else float("inf")
-        right_clear = min(right_vals) if right_vals else float("inf")
-        
-        # 5) Decide lateral shift
-        lateral_shift = 0.0
-        if left_clear < safety_threshold or right_clear < safety_threshold:
-            diff = left_clear - right_clear
+
+        # --- FRONT-SECTOR READINGS ---
+        # These index ranges depend on LiDAR configuration (assumes ~360 readings per revolution)
+        # Adjust if your sensor has a different resolution or angle coverage.
+        left_idx = range(30, 45)     # ~+30° to +45°
+        right_idx = range(315, 330)    # ~-45° to -30°
+        front_idx = list(range(350, 360)) + list(range(0, 11))  # ~center (front zone)
+
+        def avg_range(idxs):
+            """Compute average distance for valid (finite) range values."""
+            vals = [ranges[i] for i in idxs if math.isfinite(ranges[i])]
+            return sum(vals) / len(vals) if vals else float('inf')
+
+        avg_left = avg_range(left_idx)
+        avg_right = avg_range(right_idx)
+        avg_front = avg_range(front_idx)
+
+        # --- ADAPT LOOKAHEAD DISTANCE ---
+        # If there is an obstacle in front, reduce lookahead proportionally.
+        if avg_front < safety_threshold:
+            factor = avg_front / safety_threshold
+            lookahead = min_lookahead + factor * (base_lookahead - min_lookahead)
+        else:
+            lookahead = base_lookahead
+
+        # --- COMPUTE BASE TARGET ALONG PATH ---
+        base_target = lookahead_point(self.full_path, robot_pos, lookahead)
+
+        # --- COMPUTE LATERAL SHIFT ---
+        # Shift away from the closer side (toward the side with more free space)
+        lateral_shift = 0.0  # default: no shift
+
+        if avg_front < safety_threshold:
+            # Shift away from the closer side (toward the side with more free space)
+            diff = avg_left - avg_right
             diff_norm = max(-1.0, min(1.0, diff / safety_threshold))
             lateral_shift = diff_norm * max_shift
-            
-        # 6) Apply shift perpendicular to segment direction in world frame
+        # --- APPLY SHIFT IN WORLD FRAME ---
+        # Perpendicular to segment direction
         perp_yaw = seg_dir_yaw + math.pi / 2.0
         target = (
             base_target[0] + lateral_shift * math.cos(perp_yaw),
             base_target[1] + lateral_shift * math.sin(perp_yaw)
         )
-        
-        return target
-    
+
+        return target       
     # --- TODO: YOUR CODE HERE: controller used for TurtleBot ---
     def turtlebot_control(self, robot_pos: Coord, robot_h: float, target: Coord, dt: float, Ld: float) -> Tuple[float, float]:
         """
