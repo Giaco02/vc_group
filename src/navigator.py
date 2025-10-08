@@ -343,9 +343,9 @@ class GridPathFollowerNode(Node):
 
         # --- Motion and geometry parameters ---
         self.goal_tol = 0.05
-        self.node_tol = 0.1
+        self.node_tol = 0.04
         # TODO: YOUR CODE HERE: ~3 lines: set the lookahead distance for pure-pursuit based control, and the maximum allowed linear and angular velocities 
-        self.lookahead_dist = 0.75
+        self.lookahead_dist = 0.8
         self.v_max = 3.0
         self.w_max = 2.0
         # ...
@@ -357,7 +357,7 @@ class GridPathFollowerNode(Node):
         self.dwell_until: Optional[float] = None
 
         # --- Start and goal positions. TODO: OPTIONAL: modify for testing purposes as needed ---
-        self.start_pos = (0.0, 0.0)
+        self.start_pos = (0, 0)
         self.goal_pos  = (7.120, -5.696)
 
         # --- State ---
@@ -601,8 +601,8 @@ class GridPathFollowerNode(Node):
             return True
 
         # --- Parameters ---
-        dist_thresh = 0.6          # distance (m) to consider a hit (obstacle)
-        min_corridor = 0.25        # minimum gap width robot can fit through (m)
+        dist_thresh = 0.4          # distance (m) to consider a hit (obstacle)
+        min_corridor = 0.20        # minimum gap width robot can fit through (m)
         robot_width = 0.178         # TurtleBot3 width (m)
         sector_half_angle = math.radians(30)  # angular window (±45° around path direction)
 
