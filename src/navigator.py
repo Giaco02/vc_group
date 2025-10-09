@@ -669,82 +669,180 @@ class GridPathFollowerNode(Node):
 
     
     # --- TODO: YOUR CODE HERE: Implement the function to generate the lookahead point away from obstacles  ---
-    def obstacle_avoided_target(self, robot_pos: Coord, seg_dir_yaw: float) -> Coord:
+    # def obstacle_avoided_target(self, robot_pos: Coord, seg_dir_yaw: float) -> Coord:
+    #     """
+    #     Generate a target point that accounts for obstacle avoidance:
+    #     - Pure-pursuit base target at lookahead distance along the path.
+    #     - Lateral shift inside the road corridor to increase clearance.
+
+    #     Args:
+    #         robot_pos: current turtlebot position (x, y) in odom/world frame.
+    #         seg_dir_yaw: segment heading in world/odom frame (radians).
+
+    #     Returns:
+    #         Target (x, y) in world/odom frame.
+    #     """
+    #     # front = msg.ranges[0]      # Front (0°)
+    #     # left = msg.ranges[90]      # Left (90°)
+    #     # right = msg.ranges[270]    # Right (270°)
+    #     # back = msg.ranges[180]     # Back (180°)
+
+    #     #If no scan data is available, just fall back to pure-pursuit behavior
+    #     if self.scan is None:
+    #         return lookahead_point(self.full_path, robot_pos, self.lookahead_dist)
+
+    #     base_lookahead = self.lookahead_dist
+    #     close_lookahead = 0.19  # distanza fissa più vicina in caso di ostacoli
+    #     max_shift = 0.6
+    #     safety_threshold = 0.2
+    #     alpha = 0.6
+
+    #     ranges = self.scan.ranges
+
+    #     left_idx = range(15,75)
+    #     right_idx = range(285, 345)
+    #     front_idx = list(range(0,360))#list(range(345, 360)) + list(range(0, 15))
+
+    #     def avg_range(idxs):
+    #         vals = [ranges[i] for i in idxs if math.isfinite(ranges[i])]
+    #         return sum(vals) / len(vals) if vals else float("inf")
+    #     def front_score(idxs):
+    #         vals = [ranges[i] for i in idxs if math.isfinite(ranges[i])]
+    #         return  0.5 * min(vals) + 0.5 * sum(vals)/len(vals) if vals else float("inf")
+
+    #     avg_left = front_score(left_idx)
+    #     avg_right = front_score(right_idx)
+    #     avg_front = front_score(front_idx)
+
+    #     # --- ADAPT LOOKAHEAD DISTANCE ---
+    #     if avg_front < safety_threshold or avg_left < safety_threshold or avg_right < safety_threshold:
+    #         target_lookahead = close_lookahead
+    #     else:
+    #         target_lookahead = base_lookahead
+
+    #     # --- COMPLEMENTARY FILTER (lookahead smoothing) ---
+    #     if not hasattr(self, "_smooth_lookahead"):
+    #         self._smooth_lookahead = base_lookahead
+    #     alpha_dist = 0.4  # più basso = più smorzato
+    #     self._smooth_lookahead = (
+    #         alpha_dist * target_lookahead + (1 - alpha_dist) * self._smooth_lookahead
+    #     )
+
+    #     # --- BASE TARGET CON LOOKAHEAD FILTRATO ---
+    #     base_target = lookahead_point(self.full_path, robot_pos, self._smooth_lookahead)
+
+
+    #     # --- COMPUTE LATERAL SHIFT ---
+    #     if avg_front < safety_threshold or avg_left < safety_threshold or avg_right < safety_threshold:
+    #         diff = avg_left - avg_right
+    #         diff_norm = max(-1.0, min(1.0, diff / (avg_left + avg_right)))
+    #         target_shift = diff_norm * max_shift
+    #     else:
+    #         target_shift = 0.0
+
+    #     # --- SMOOTH LATERAL SHIFT ---
+    #     if not hasattr(self, "_smooth_shift"):
+    #         self._smooth_shift = 0.0
+    #     beta = 0.4
+    #     self._smooth_shift = beta * target_shift + (1 - beta) * self._smooth_shift
+
+    #     # --- APPLY SHIFT IN WORLD FRAME ---
+    #     perp_yaw = seg_dir_yaw + math.pi / 2.0
+    #     target = (
+    #         base_target[0] + self._smooth_shift* math.cos(perp_yaw),
+    #         base_target[1] + self._smooth_shift * math.sin(perp_yaw)
+    #     )
+    #     return target
+
+
+
+
+
+    def obstacle_avoided_target(self, robot_pos: tuple, seg_dir_yaw: float) -> tuple:
         """
-        Generate a target point that accounts for obstacle avoidance:
-        - Pure-pursuit base target at lookahead distance along the path.
-        - Lateral shift inside the road corridor to increase clearance.
-
-        Args:
-            robot_pos: current turtlebot position (x, y) in odom/world frame.
-            seg_dir_yaw: segment heading in world/odom frame (radians).
-
-        Returns:
-            Target (x, y) in world/odom frame.
+        Generate a lateral-only avoidance target:
+        - If no close obstacles in front, return standard lookahead
+        - Otherwise sample points along the line perpendicular to seg_dir_yaw
+        and pick the one that maximizes lateral clearance from front obstacles
+        while minimizing lateral displacement.
         """
-        # front = msg.ranges[0]      # Front (0°)
-        # left = msg.ranges[90]      # Left (90°)
-        # right = msg.ranges[270]    # Right (270°)
-        # back = msg.ranges[180]     # Back (180°)
+        radius = 0.1           # max lateral shift (m)
+        num_samples = 10       # samples per side (total samples = 2*num_samples + 1)
+        safety_dist = 0.3      # consider as "obstacle" only ranges < safety_dist
+        lateral_weight = 0.8   # penalty weight for lateral displacement (tune this)
+        best_point = None
+        best_score = -float('inf')
 
-        # If no scan data is available, just fall back to pure-pursuit behavior
-        if self.scan is None:
+        # front LIDAR indices (±15 degrees around 0°)
+        front_idx = list(range(345, 360)) + list(range(0, 15))
+        # keep only indices that actually exist in this scan
+        front_idx = [i for i in front_idx if i < len(self.scan.ranges)]
+
+        # quick check: any close obstacle in front?
+        obstacle_close = any(
+            (self.scan.ranges[i] < safety_dist) for i in front_idx
+            if self.scan.ranges[i] > 0.01
+        )
+        if not obstacle_close:
+            # no front obstacles close -> normal lookahead
             return lookahead_point(self.full_path, robot_pos, self.lookahead_dist)
 
-        # --- PARAMETERS ---
-        base_lookahead = self.lookahead_dist         # default lookahead distance
-        min_lookahead = 0.05 * base_lookahead         # shortest lookahead when obstacles are close
-        max_shift = 0.3                             # maximum lateral shift (m)
-        safety_threshold = 0.5                       # distance where avoidance starts (m)
-        angle_min = self.scan.angle_min
-        angle_inc = self.scan.angle_increment
-        ranges = self.scan.ranges
+        # unit vectors: segment direction and its perpendicular (left)
+        seg_dx = math.cos(seg_dir_yaw)
+        seg_dy = math.sin(seg_dir_yaw)
+        perp_dx = -seg_dy   # perpendicular left
+        perp_dy = seg_dx
 
-        # --- FRONT-SECTOR READINGS ---
-        # These index ranges depend on LiDAR configuration (assumes ~360 readings per revolution)
-        # Adjust if your sensor has a different resolution or angle coverage.
-        left_idx = range(30, 45)     # ~+30° to +45°
-        right_idx = range(315, 330)    # ~-45° to -30°
-        front_idx = list(range(350, 360)) + list(range(0, 11))  # ~center (front zone)
+        # sample candidates along the perpendicular line: alpha in [-radius, +radius]
+        for i in range(-num_samples, num_samples + 1):
+            alpha = radius * i / num_samples
+            candidate = (
+                robot_pos[0] + alpha * perp_dx,
+                robot_pos[1] + alpha * perp_dy
+            )
 
-        def avg_range(idxs):
-            """Compute average distance for valid (finite) range values."""
-            vals = [ranges[i] for i in idxs if math.isfinite(ranges[i])]
-            return sum(vals) / len(vals) if vals else float('inf')
+            # compute minimum perpendicular distance (relative to segment direction)
+            # between the candidate and any front obstacle (only obstacles < safety_dist)
+            min_perp_dist = float('inf')
+            for idx in front_idx:
+                r = self.scan.ranges[idx]
+                if r < 0.01 or r > safety_dist:
+                    continue
+                angle_rad = self.scan.angle_min + idx * self.scan.angle_increment
+                # If scan angles are in robot frame, and you have robot yaw (self.yaw),
+                # you may need: angle_world = angle_rad + self.yaw
+                angle_world = angle_rad  # adjust if necessary
+                obs_x = robot_pos[0] + r * math.cos(angle_world)
+                obs_y = robot_pos[1] + r * math.sin(angle_world)
 
-        avg_left = avg_range(left_idx)
-        avg_right = avg_range(right_idx)
-        avg_front = avg_range(front_idx)
+                # vector from candidate to obstacle
+                v_x = obs_x - candidate[0]
+                v_y = obs_y - candidate[1]
 
-        # --- ADAPT LOOKAHEAD DISTANCE ---
-        # If there is an obstacle in front, reduce lookahead proportionally.
-        if avg_front < safety_threshold:
-            factor = avg_front / safety_threshold
-            lookahead = min_lookahead + factor * (base_lookahead - min_lookahead)
-        else:
-            lookahead = base_lookahead
+                # perpendicular distance to segment direction = |v x seg_unit|
+                # cross product magnitude (since seg unit length = 1)
+                perp_dist = abs(v_x * seg_dy - v_y * seg_dx)
+                min_perp_dist = min(min_perp_dist, perp_dist)
 
-        # --- COMPUTE BASE TARGET ALONG PATH ---
-        base_target = lookahead_point(self.full_path, robot_pos, lookahead)
+            # if no obstacle considered for this candidate, assume full clearance = safety_dist
+            if min_perp_dist == float('inf'):
+                min_perp_dist = safety_dist
 
-        # --- COMPUTE LATERAL SHIFT ---
-        # Shift away from the closer side (toward the side with more free space)
-        lateral_shift = 0.0  # default: no shift
+            # score: prefer large lateral clearance, penalize large lateral shifts
+            score = min_perp_dist - lateral_weight * abs(alpha)
 
-        if avg_front < safety_threshold:
-            # Shift away from the closer side (toward the side with more free space)
-            diff = avg_left - avg_right
-            diff_norm = max(-1.0, min(1.0, diff / safety_threshold))
-            lateral_shift = diff_norm * max_shift
-        # --- APPLY SHIFT IN WORLD FRAME ---
-        # Perpendicular to segment direction
-        perp_yaw = seg_dir_yaw + math.pi / 2.0
-        target = (
-            base_target[0] + lateral_shift * math.cos(perp_yaw),
-            base_target[1] + lateral_shift * math.sin(perp_yaw)
-        )
+            if score > best_score:
+                best_score = score
+                best_point = candidate
 
-        return target       
+        # fallback
+        if best_point is None:
+            best_point = lookahead_point(self.full_path, robot_pos, self.lookahead_dist)
+
+        return best_point
+
+
+
     # --- TODO: YOUR CODE HERE: controller used for TurtleBot ---
     def turtlebot_control(self, robot_pos: Coord, robot_h: float, target: Coord, dt: float, Ld: float) -> Tuple[float, float]:
         """
@@ -781,7 +879,7 @@ class GridPathFollowerNode(Node):
         v_cmd = v_base * turn_factor
         
         # Further reduce speed if very close to target
-        if distance_to_target < 0.1:
+        if distance_to_target < 0.2:
             v_cmd *= distance_to_target / 0.1
         
         v_cmd = np.clip(v_cmd, 0.0, self.v_max)
