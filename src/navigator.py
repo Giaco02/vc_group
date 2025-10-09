@@ -345,9 +345,9 @@ class GridPathFollowerNode(Node):
         self.goal_tol = 0.05
         self.node_tol = 0.04
         # TODO: YOUR CODE HERE: ~3 lines: set the lookahead distance for pure-pursuit based control, and the maximum allowed linear and angular velocities 
-        self.lookahead_dist = 0.8
-        self.v_max = 3.0
-        self.w_max = 2.0
+        self.lookahead_dist = 0.55
+        self.v_max = 5.0
+        self.w_max = 5.0
         # ...
         # TODO: YOUR CODE HERE: ~1-2 lines: set your PID controller/s for linear/angular motion
         self.pid_angular = PID(kp=0.8, ki=0.1, kd=0.05, i_limit=1.0)
@@ -600,40 +600,47 @@ class GridPathFollowerNode(Node):
             self.get_logger().warn("No LIDAR data yet — assuming path is passable.")
             return True
 
-        # --- Parameters ---
-        dist_thresh = 0.4          # distance (m) to consider a hit (obstacle)
-        min_corridor = 0.20        # minimum gap width robot can fit through (m)
-        robot_width = 0.178         # TurtleBot3 width (m)
-        sector_half_angle = math.radians(30)  # angular window (±45° around path direction)
+                # --- Parameters ---
+        dist_thresh = 0.3
+        min_corridor = 0.2
+        robot_width = 0.178
+        sector_half_angle = math.radians(30)
 
-        # --- Extract LIDAR data ---
-        angle_min = self.scan.angle_min
-        angle_max = self.scan.angle_max
-        angle_inc = self.scan.angle_increment
+        # --- LIDAR geometry ---
+        angle_min = self.scan.angle_min       # 0.0
+        angle_max = self.scan.angle_max       # 6.28
+        angle_inc = self.scan.angle_increment # 0.0175
         ranges = np.array(self.scan.ranges)
         n = len(ranges)
 
-        # --- Compute relative yaw ---
-        # LIDAR frame is robot-relative; seg_dir_yaw is world-relative.
-        rel_yaw = angle_wrap(seg_dir_yaw - self.yaw)
+        # --- Compute relative yaw in lidar frame (wrap to [0, 2π)) ---
+        rel_yaw = (seg_dir_yaw - self.yaw) % (2 * math.pi)
         center_angle = rel_yaw
-        left_bound = center_angle - sector_half_angle
-        right_bound = center_angle + sector_half_angle
 
-        # Convert angles to indices
-        left_idx = int(max(0, (left_bound - angle_min) / angle_inc))
-        right_idx = int(min(n - 1, (right_bound - angle_min) / angle_inc))
-        if left_idx >= right_idx:
-            self.get_logger().warn("Invalid LIDAR sector bounds — assuming safe.")
-            return True
+        # Compute angular window and wrap within [0, 2π)
+        left_bound = (center_angle - sector_half_angle) % (2 * math.pi)
+        right_bound = (center_angle + sector_half_angle) % (2 * math.pi)
 
-        sector_ranges = ranges[left_idx:right_idx]
-        sector_angles = np.linspace(left_bound, right_bound, len(sector_ranges))
+        # --- Handle wrap-around case (window crosses 0 radians) ---
+        if left_bound < right_bound:
+            indices = np.arange(int((left_bound - angle_min) / angle_inc),
+                                int((right_bound - angle_min) / angle_inc))
+        else:
+            # e.g., left=350°, right=10°: combine two slices
+            indices = np.concatenate((
+                np.arange(int((left_bound - angle_min) / angle_inc), n),
+                np.arange(0, int((right_bound - angle_min) / angle_inc))
+            ))
 
-        # --- Detect obstacle hits ---
+        # Safety clamp
+        indices = np.clip(indices, 0, n - 1).astype(int)
+        sector_ranges = ranges[indices]
+        sector_angles = (angle_min + indices * angle_inc) % (2 * math.pi)
+
+        # --- Obstacle detection ---
         hits = np.where(sector_ranges < dist_thresh)[0]
         if len(hits) == 0:
-            self.get_logger().debug("No obstacles detected in sector — passable.")
+            self.get_logger().info("No obstacles detected in sector — passable.")
             return True
 
         mid_idx = len(sector_ranges) // 2
@@ -641,28 +648,26 @@ class GridPathFollowerNode(Node):
         right_hits = hits[hits > mid_idx]
 
         if len(left_hits) == 0 or len(right_hits) == 0:
-            self.get_logger().debug("Open space on one side — passable.")
+            self.get_logger().info("Open space on one side — passable.")
             return True
 
-        # --- Last hit on the left, first hit on the right ---
-        left_hit_idx = left_hits[-1]
-        right_hit_idx = right_hits[0]
-        d1 = sector_ranges[left_hit_idx]
-        d2 = sector_ranges[right_hit_idx]
-        d_angle = abs(sector_angles[right_hit_idx] - sector_angles[left_hit_idx])
+        # --- Last hit on left, first hit on right ---
+        li = left_hits[-1]
+        ri = right_hits[0]
+        d1 = sector_ranges[li]
+        d2 = sector_ranges[ri]
+        d_angle = abs(sector_angles[ri] - sector_angles[li])
 
-        # --- Compute corridor width (Law of Cosines) ---
-        width = math.sqrt(max(0.0, d1**2 + d2**2 - 2 * d1 * d2 * math.cos(d_angle)))
-
-        # --- Decision ---
+        # --- Law of Cosines for corridor width ---
+        width = math.sqrt(max(0.0, d1**2 + d2**2 - 2*d1*d2*math.cos(d_angle)))
         passable = width > max(min_corridor, robot_width)
 
-        # --- Logging ---
+        # --- Detailed Logging ---
         self.get_logger().info(
-            f"[is_passable] Sector ±{math.degrees(sector_half_angle):.1f}°, "
-            f"width={width:.3f} m, "
-            f"d1={d1:.3f}, d2={d2:.3f}, Δθ={math.degrees(d_angle):.1f}°, "
-            f"passable={passable}"
+            f"[is_passable] rel_yaw={rel_yaw:.2f} rad "
+            f"({math.degrees(rel_yaw):.1f}°), left_idx={indices[0]}, right_idx={indices[-1]}, "
+            f"hits_left={len(left_hits)}, hits_right={len(right_hits)}, "
+            f"width={width:.3f} m, passable={passable}"
         )
 
         return passable
