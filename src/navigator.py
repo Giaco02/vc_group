@@ -343,11 +343,17 @@ class GridPathFollowerNode(Node):
 
         # --- Motion and geometry parameters ---
         self.goal_tol = 0.05
-        self.node_tol = 0.05
+        self.node_tol = 0.04
         # TODO: YOUR CODE HERE: ~3 lines: set the lookahead distance for pure-pursuit based control, and the maximum allowed linear and angular velocities 
+<<<<<<< HEAD
         self.lookahead_dist = 0.5
         self.v_max = 0.35
         self.w_max = 1.2
+=======
+        self.lookahead_dist = 0.8
+        self.v_max = 3.0
+        self.w_max = 2.0
+>>>>>>> test_mufi
         # ...
         # TODO: YOUR CODE HERE: ~1-2 lines: set your PID controller/s for linear/angular motion
         self.pid_angular = PID(kp=1.0, ki=0.0, kd=0.05, i_limit=0.5)
@@ -358,7 +364,7 @@ class GridPathFollowerNode(Node):
         self.dwell_until: Optional[float] = None
 
         # --- Start and goal positions. TODO: OPTIONAL: modify for testing purposes as needed ---
-        self.start_pos = (0.0, 0.0)
+        self.start_pos = (0, 0)
         self.goal_pos  = (7.120, -5.696)
 
         # --- State ---
@@ -602,6 +608,7 @@ class GridPathFollowerNode(Node):
             True if passable; False otherwise.
         """
         if self.scan is None:
+<<<<<<< HEAD
             return True  # Assume passable if no scan data.
 
         # Parameters for obstacle detection
@@ -692,6 +699,80 @@ class GridPathFollowerNode(Node):
     # == ==========================================================================
     # IMPROVED obstacle_avoided_target - With alignment awareness
     # ============================================================================
+=======
+            self.get_logger().warn("No LIDAR data yet — assuming path is passable.")
+            return True
+
+        # --- Parameters ---
+        dist_thresh = 0.4          # distance (m) to consider a hit (obstacle)
+        min_corridor = 0.20        # minimum gap width robot can fit through (m)
+        robot_width = 0.178         # TurtleBot3 width (m)
+        sector_half_angle = math.radians(30)  # angular window (±45° around path direction)
+
+        # --- Extract LIDAR data ---
+        angle_min = self.scan.angle_min
+        angle_max = self.scan.angle_max
+        angle_inc = self.scan.angle_increment
+        ranges = np.array(self.scan.ranges)
+        n = len(ranges)
+
+        # --- Compute relative yaw ---
+        # LIDAR frame is robot-relative; seg_dir_yaw is world-relative.
+        rel_yaw = angle_wrap(seg_dir_yaw - self.yaw)
+        center_angle = rel_yaw
+        left_bound = center_angle - sector_half_angle
+        right_bound = center_angle + sector_half_angle
+
+        # Convert angles to indices
+        left_idx = int(max(0, (left_bound - angle_min) / angle_inc))
+        right_idx = int(min(n - 1, (right_bound - angle_min) / angle_inc))
+        if left_idx >= right_idx:
+            self.get_logger().warn("Invalid LIDAR sector bounds — assuming safe.")
+            return True
+
+        sector_ranges = ranges[left_idx:right_idx]
+        sector_angles = np.linspace(left_bound, right_bound, len(sector_ranges))
+
+        # --- Detect obstacle hits ---
+        hits = np.where(sector_ranges < dist_thresh)[0]
+        if len(hits) == 0:
+            self.get_logger().debug("No obstacles detected in sector — passable.")
+            return True
+
+        mid_idx = len(sector_ranges) // 2
+        left_hits = hits[hits < mid_idx]
+        right_hits = hits[hits > mid_idx]
+
+        if len(left_hits) == 0 or len(right_hits) == 0:
+            self.get_logger().debug("Open space on one side — passable.")
+            return True
+
+        # --- Last hit on the left, first hit on the right ---
+        left_hit_idx = left_hits[-1]
+        right_hit_idx = right_hits[0]
+        d1 = sector_ranges[left_hit_idx]
+        d2 = sector_ranges[right_hit_idx]
+        d_angle = abs(sector_angles[right_hit_idx] - sector_angles[left_hit_idx])
+
+        # --- Compute corridor width (Law of Cosines) ---
+        width = math.sqrt(max(0.0, d1**2 + d2**2 - 2 * d1 * d2 * math.cos(d_angle)))
+
+        # --- Decision ---
+        passable = width > max(min_corridor, robot_width)
+
+        # --- Logging ---
+        self.get_logger().info(
+            f"[is_passable] Sector ±{math.degrees(sector_half_angle):.1f}°, "
+            f"width={width:.3f} m, "
+            f"d1={d1:.3f}, d2={d2:.3f}, Δθ={math.degrees(d_angle):.1f}°, "
+            f"passable={passable}"
+        )
+
+        return passable
+
+    
+    # --- TODO: YOUR CODE HERE: Implement the function to generate the lookahead point away from obstacles  ---
+>>>>>>> test_mufi
     def obstacle_avoided_target(self, robot_pos: Coord, seg_dir_yaw: float) -> Coord:
         """
         Generate a target point that accounts for obstacle avoidance:
@@ -707,6 +788,7 @@ class GridPathFollowerNode(Node):
         Returns:
             Target (x, y) in world/odom frame.
         """
+<<<<<<< HEAD
         # 1) Pure-pursuit base target
         base_target = lookahead_point(self.full_path, robot_pos, self.lookahead_dist)
 
@@ -723,10 +805,27 @@ class GridPathFollowerNode(Node):
         safety_threshold = 0.28
         max_shift = 0.04  # Even gentler
 
+=======
+        # front = msg.ranges[0]      # Front (0°)
+        # left = msg.ranges[90]      # Left (90°)
+        # right = msg.ranges[270]    # Right (270°)
+        # back = msg.ranges[180]     # Back (180°)
+
+        # If no scan data is available, just fall back to pure-pursuit behavior
+        if self.scan is None:
+            return lookahead_point(self.full_path, robot_pos, self.lookahead_dist)
+
+        # --- PARAMETERS ---
+        base_lookahead = self.lookahead_dist         # default lookahead distance
+        min_lookahead = 0.05 * base_lookahead         # shortest lookahead when obstacles are close
+        max_shift = 0.3                             # maximum lateral shift (m)
+        safety_threshold = 0.5                       # distance where avoidance starts (m)
+>>>>>>> test_mufi
         angle_min = self.scan.angle_min
         angle_inc = self.scan.angle_increment
         ranges = self.scan.ranges
 
+<<<<<<< HEAD
         left_vals = []
         right_vals = []
 
@@ -768,12 +867,53 @@ class GridPathFollowerNode(Node):
             lateral_shift = diff_norm * max_shift
 
         # 6) Apply shift
+=======
+        # --- FRONT-SECTOR READINGS ---
+        # These index ranges depend on LiDAR configuration (assumes ~360 readings per revolution)
+        # Adjust if your sensor has a different resolution or angle coverage.
+        left_idx = range(30, 45)     # ~+30° to +45°
+        right_idx = range(315, 330)    # ~-45° to -30°
+        front_idx = list(range(350, 360)) + list(range(0, 11))  # ~center (front zone)
+
+        def avg_range(idxs):
+            """Compute average distance for valid (finite) range values."""
+            vals = [ranges[i] for i in idxs if math.isfinite(ranges[i])]
+            return sum(vals) / len(vals) if vals else float('inf')
+
+        avg_left = avg_range(left_idx)
+        avg_right = avg_range(right_idx)
+        avg_front = avg_range(front_idx)
+
+        # --- ADAPT LOOKAHEAD DISTANCE ---
+        # If there is an obstacle in front, reduce lookahead proportionally.
+        if avg_front < safety_threshold:
+            factor = avg_front / safety_threshold
+            lookahead = min_lookahead + factor * (base_lookahead - min_lookahead)
+        else:
+            lookahead = base_lookahead
+
+        # --- COMPUTE BASE TARGET ALONG PATH ---
+        base_target = lookahead_point(self.full_path, robot_pos, lookahead)
+
+        # --- COMPUTE LATERAL SHIFT ---
+        # Shift away from the closer side (toward the side with more free space)
+        lateral_shift = 0.0  # default: no shift
+
+        if avg_front < safety_threshold:
+            # Shift away from the closer side (toward the side with more free space)
+            diff = avg_left - avg_right
+            diff_norm = max(-1.0, min(1.0, diff / safety_threshold))
+            lateral_shift = diff_norm * max_shift
+        # --- APPLY SHIFT IN WORLD FRAME ---
+        # Perpendicular to segment direction
+>>>>>>> test_mufi
         perp_yaw = seg_dir_yaw + math.pi / 2.0
         target = (
             base_target[0] + lateral_shift * math.cos(perp_yaw),
             base_target[1] + lateral_shift * math.sin(perp_yaw)
         )
 
+<<<<<<< HEAD
         return target
 
 
@@ -782,6 +922,11 @@ class GridPathFollowerNode(Node):
     # ============================================================================
     def turtlebot_control(self, robot_pos: Coord, robot_h: float, target: Coord, 
                           dt: float, Ld: float) -> Tuple[float, float]:
+=======
+        return target       
+    # --- TODO: YOUR CODE HERE: controller used for TurtleBot ---
+    def turtlebot_control(self, robot_pos: Coord, robot_h: float, target: Coord, dt: float, Ld: float) -> Tuple[float, float]:
+>>>>>>> test_mufi
         """
         Compute (v, w) commands with conservative speed control.
 
