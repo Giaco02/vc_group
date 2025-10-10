@@ -14,6 +14,7 @@ from sensor_msgs.msg import LaserScan
 from rclpy.parameter import Parameter
 from rcl_interfaces.msg import SetParametersResult
 import sys
+from scipy.spatial import cKDTree
 
 Coord = Tuple[float, float]
 Index = Tuple[int, int]
@@ -357,7 +358,7 @@ class GridPathFollowerNode(Node):
         self.dwell_until: Optional[float] = None
 
         # --- Start and goal positions. TODO: OPTIONAL: modify for testing purposes as needed ---
-        self.start_pos = (0, 0)
+        self.start_pos = (4.984, -4.272) #(0, 0)#
         self.goal_pos  = (7.120, -5.696)
 
         # --- State ---
@@ -600,40 +601,47 @@ class GridPathFollowerNode(Node):
             self.get_logger().warn("No LIDAR data yet — assuming path is passable.")
             return True
 
-        # --- Parameters ---
-        dist_thresh = 0.4          # distance (m) to consider a hit (obstacle)
-        min_corridor = 0.20        # minimum gap width robot can fit through (m)
-        robot_width = 0.178         # TurtleBot3 width (m)
-        sector_half_angle = math.radians(30)  # angular window (±45° around path direction)
+                # --- Parameters ---
+        dist_thresh = 0.3
+        min_corridor = 0.2
+        robot_width = 0.178
+        sector_half_angle = math.radians(30)
 
-        # --- Extract LIDAR data ---
-        angle_min = self.scan.angle_min
-        angle_max = self.scan.angle_max
-        angle_inc = self.scan.angle_increment
+        # --- LIDAR geometry ---
+        angle_min = self.scan.angle_min       # 0.0
+        angle_max = self.scan.angle_max       # 6.28
+        angle_inc = self.scan.angle_increment # 0.0175
         ranges = np.array(self.scan.ranges)
         n = len(ranges)
 
-        # --- Compute relative yaw ---
-        # LIDAR frame is robot-relative; seg_dir_yaw is world-relative.
-        rel_yaw = angle_wrap(seg_dir_yaw - self.yaw)
+        # --- Compute relative yaw in lidar frame (wrap to [0, 2π)) ---
+        rel_yaw = (seg_dir_yaw - self.yaw) % (2 * math.pi)
         center_angle = rel_yaw
-        left_bound = center_angle - sector_half_angle
-        right_bound = center_angle + sector_half_angle
 
-        # Convert angles to indices
-        left_idx = int(max(0, (left_bound - angle_min) / angle_inc))
-        right_idx = int(min(n - 1, (right_bound - angle_min) / angle_inc))
-        if left_idx >= right_idx:
-            self.get_logger().warn("Invalid LIDAR sector bounds — assuming safe.")
-            return True
+        # Compute angular window and wrap within [0, 2π)
+        left_bound = (center_angle - sector_half_angle) % (2 * math.pi)
+        right_bound = (center_angle + sector_half_angle) % (2 * math.pi)
 
-        sector_ranges = ranges[left_idx:right_idx]
-        sector_angles = np.linspace(left_bound, right_bound, len(sector_ranges))
+        # --- Handle wrap-around case (window crosses 0 radians) ---
+        if left_bound < right_bound:
+            indices = np.arange(int((left_bound - angle_min) / angle_inc),
+                                int((right_bound - angle_min) / angle_inc))
+        else:
+            # e.g., left=350°, right=10°: combine two slices
+            indices = np.concatenate((
+                np.arange(int((left_bound - angle_min) / angle_inc), n),
+                np.arange(0, int((right_bound - angle_min) / angle_inc))
+            ))
 
-        # --- Detect obstacle hits ---
+        # Safety clamp
+        indices = np.clip(indices, 0, n - 1).astype(int)
+        sector_ranges = ranges[indices]
+        sector_angles = (angle_min + indices * angle_inc) % (2 * math.pi)
+
+        # --- Obstacle detection ---
         hits = np.where(sector_ranges < dist_thresh)[0]
         if len(hits) == 0:
-            self.get_logger().debug("No obstacles detected in sector — passable.")
+            self.get_logger().info("No obstacles detected in sector — passable.")
             return True
 
         mid_idx = len(sector_ranges) // 2
@@ -641,28 +649,26 @@ class GridPathFollowerNode(Node):
         right_hits = hits[hits > mid_idx]
 
         if len(left_hits) == 0 or len(right_hits) == 0:
-            self.get_logger().debug("Open space on one side — passable.")
+            self.get_logger().info("Open space on one side — passable.")
             return True
 
-        # --- Last hit on the left, first hit on the right ---
-        left_hit_idx = left_hits[-1]
-        right_hit_idx = right_hits[0]
-        d1 = sector_ranges[left_hit_idx]
-        d2 = sector_ranges[right_hit_idx]
-        d_angle = abs(sector_angles[right_hit_idx] - sector_angles[left_hit_idx])
+        # --- Last hit on left, first hit on right ---
+        li = left_hits[-1]
+        ri = right_hits[0]
+        d1 = sector_ranges[li]
+        d2 = sector_ranges[ri]
+        d_angle = abs(sector_angles[ri] - sector_angles[li])
 
-        # --- Compute corridor width (Law of Cosines) ---
-        width = math.sqrt(max(0.0, d1**2 + d2**2 - 2 * d1 * d2 * math.cos(d_angle)))
-
-        # --- Decision ---
+        # --- Law of Cosines for corridor width ---
+        width = math.sqrt(max(0.0, d1**2 + d2**2 - 2*d1*d2*math.cos(d_angle)))
         passable = width > max(min_corridor, robot_width)
 
-        # --- Logging ---
+        # --- Detailed Logging ---
         self.get_logger().info(
-            f"[is_passable] Sector ±{math.degrees(sector_half_angle):.1f}°, "
-            f"width={width:.3f} m, "
-            f"d1={d1:.3f}, d2={d2:.3f}, Δθ={math.degrees(d_angle):.1f}°, "
-            f"passable={passable}"
+            f"[is_passable] rel_yaw={rel_yaw:.2f} rad "
+            f"({math.degrees(rel_yaw):.1f}°), left_idx={indices[0]}, right_idx={indices[-1]}, "
+            f"hits_left={len(left_hits)}, hits_right={len(right_hits)}, "
+            f"width={width:.3f} m, passable={passable}"
         )
 
         return passable
@@ -766,82 +772,166 @@ class GridPathFollowerNode(Node):
         and pick the one that maximizes lateral clearance from front obstacles
         while minimizing lateral displacement.
         """
-        radius = 0.1           # max lateral shift (m)
-        num_samples = 10       # samples per side (total samples = 2*num_samples + 1)
-        safety_dist = 0.3      # consider as "obstacle" only ranges < safety_dist
-        lateral_weight = 0.8   # penalty weight for lateral displacement (tune this)
-        best_point = None
-        best_score = -float('inf')
 
-        # front LIDAR indices (±15 degrees around 0°)
-        front_idx = list(range(345, 360)) + list(range(0, 15))
-        # keep only indices that actually exist in this scan
-        front_idx = [i for i in front_idx if i < len(self.scan.ranges)]
+        # # --- Parameters ---
+        # radius = 0.4         # max lateral shift (m)
+        # num_samples = 36
+        # safety_dist = 0.3      # obstacle considered "close"
+        # lateral_weight = 0.2
+        # forward_step = 0.05     # small forward offset
+        # blend = 1           # mix segment direction and robot yaw
+        # beta = 0.7             # smoothing factor (0=new, 1=old)
 
-        # quick check: any close obstacle in front?
-        obstacle_close = any(
-            (self.scan.ranges[i] < safety_dist) for i in front_idx
-            if self.scan.ranges[i] > 0.01
-        )
+        # best_point = None
+        # best_score = -float('inf')
+
+        # # Front LIDAR indices, wider view for corridor
+        # front_idx = [i for i in list(range(330, 360)) + list(range(0, 30)) if i < len(self.scan.ranges)]
+
+        # # Quick check for obstacles
+        # obstacle_close = any(0.01 < self.scan.ranges[i] < safety_dist for i in front_idx)
+        # if not obstacle_close:
+        #     # No obstacle → normal lookahead
+        #     return lookahead_point(self.full_path, robot_pos, self.lookahead_dist)
+
+        # # Blended direction for smooth heading
+        # blended_yaw = (1 - blend) * self.yaw + blend * seg_dir_yaw
+        # seg_dx = math.cos(blended_yaw)
+        # seg_dy = math.sin(blended_yaw)
+        # perp_dx = -seg_dy
+        # perp_dy = seg_dx
+
+        # # Sample candidates along the perpendicular
+        # for i in range(-num_samples, num_samples + 1):
+        #     alpha = radius * i / num_samples
+        #     candidate = (
+        #         robot_pos[0] + forward_step * seg_dx + alpha * perp_dx,
+        #         robot_pos[1] + forward_step * seg_dy + alpha * perp_dy
+        #     )
+
+        #     # Initialize clearances
+        #     min_perp_dist = safety_dist
+        #     long_clearance = forward_step  # at least forward_step
+
+        #     for idx in range(len(self.scan.ranges)):
+        #         r = self.scan.ranges[idx]
+        #         if not (0.01 < r < 0.2):
+        #             continue
+
+        #         # Convert LIDAR ray to world frame
+        #         angle_world = self.scan.angle_min + idx * self.scan.angle_increment + self.yaw
+        #         obs_x = robot_pos[0] + r * math.cos(angle_world)
+        #         obs_y = robot_pos[1] + r * math.sin(angle_world)
+
+        #         # Vector from candidate to obstacle
+        #         v_x = obs_x - candidate[0]
+        #         v_y = obs_y - candidate[1]
+
+        #         long_dist = v_x * seg_dx + v_y * seg_dy
+        #         if long_dist < 0:
+        #             continue
+
+        #         perp_dist = abs(v_x * seg_dy - v_y * seg_dx)
+        #         min_perp_dist = min(min_perp_dist, perp_dist)
+        #         long_clearance = min(long_clearance, long_dist)
+
+        #     # Scoring: prioritize advancing further, then lateral clearance, penalize lateral shift
+        #     score = long_clearance + 0.3 * min_perp_dist #- lateral_weight * abs(alpha)
+
+        #     if score > best_score:
+        #         best_score = score
+        #         best_point = candidate
+
+        # # --- Fallback ---
+        # if best_point is None:
+        #     best_point = lookahead_point(self.full_path, robot_pos, self.lookahead_dist)
+
+        # # --- Smooth with previous lookahead (reduces oscillation) ---
+        # if hasattr(self, 'prev_lookahead'):
+        #     best_point = (
+        #         beta * self.prev_lookahead[0] + (1 - beta) * best_point[0],
+        #         beta * self.prev_lookahead[1] + (1 - beta) * best_point[1]
+        #     )
+
+        # self.prev_lookahead = best_point  # store for next iteration
+
+        # return best_point
+        safety_dist = 0.3       # consider as obstacle
+        lookahead_dist = self.lookahead_dist
+        beta = 0.7                 # smoothing factor for previous lookahead
+        emergency_dist = 0.0     # threshold for emergency lateral shift
+        lateral_limit = 0.3       # max lateral shift
+
+        # --- Step 1: check for obstacles in front (±45°) ---
+        front_idx = [i for i in list(range(330, 360)) + list(range(0, 30)) if i < len(self.scan.ranges)]
+        obstacle_close = any(0.01 < self.scan.ranges[i] < safety_dist for i in front_idx)
+
         if not obstacle_close:
-            # no front obstacles close -> normal lookahead
-            return lookahead_point(self.full_path, robot_pos, self.lookahead_dist)
+            # No obstacles close -> normal lookahead along path
+            return lookahead_point(self.full_path, robot_pos, lookahead_dist)
 
-        # unit vectors: segment direction and its perpendicular (left)
+        # --- Step 2: convert LIDAR points to world coordinates relative to robot ---
+        lidar_points = []
+        for i, r in enumerate(self.scan.ranges):
+            if 0.01 < r < safety_dist:
+                angle_world = self.scan.angle_min + i * self.scan.angle_increment + self.yaw
+                x = robot_pos[0] + r * math.cos(angle_world)
+                y = robot_pos[1] + r * math.sin(angle_world)
+                lidar_points.append((x, y))
+
+        if not lidar_points:
+            return lookahead_point(self.full_path, robot_pos, lookahead_dist)
+
+        lidar_points = np.array(lidar_points)
+        rel_points = lidar_points - np.array(robot_pos)
+
+        # --- Step 3: define segment direction and perpendicular ---
         seg_dx = math.cos(seg_dir_yaw)
         seg_dy = math.sin(seg_dir_yaw)
-        perp_dx = -seg_dy   # perpendicular left
+        perp_dx = -seg_dy
         perp_dy = seg_dx
+        perp_axis = np.array([perp_dx, perp_dy])
+        seg_axis = np.array([seg_dx, seg_dy])
 
-        # sample candidates along the perpendicular line: alpha in [-radius, +radius]
-        for i in range(-num_samples, num_samples + 1):
-            alpha = radius * i / num_samples
-            candidate = (
-                robot_pos[0] + alpha * perp_dx,
-                robot_pos[1] + alpha * perp_dy
+        # --- Step 4: project points onto perpendicular axis ---
+        proj = rel_points @ perp_axis
+        sorted_proj = np.sort(proj)
+
+        # --- Step 4b: check if any obstacle is very close along segment (emergency) ---
+        long_dists = rel_points @ seg_axis
+        min_front = np.min(long_dists)
+        
+        if min_front < emergency_dist:
+            # Emergency: choose side with more free space
+            left_space = -np.min(sorted_proj)
+            right_space = np.max(sorted_proj)
+            lateral_shift = lateral_limit if right_space >= left_space else -lateral_limit
+        else:
+            # Normal: take center of largest gap with safety margin
+            gaps = np.diff(sorted_proj)
+            if len(gaps) == 0:
+                lateral_shift = 0.0
+            else:
+                max_gap_idx = np.argmax(gaps)
+                gap_start = sorted_proj[max_gap_idx] + 0.15  # safety margin 15cm
+                gap_end = sorted_proj[max_gap_idx+1] - 0.15
+                lateral_shift = np.clip((gap_start + gap_end)/2, -lateral_limit, lateral_limit)
+
+        # --- Step 5: compute lookahead point ---
+        lookahead_point_candidate = (
+            robot_pos[0] + lateral_shift * perp_dx + 0.15* seg_dy , #0.15* seg_dy
+            robot_pos[1] + lateral_shift * perp_dy + 0.15* seg_dy
+        )
+
+        # --- Step 6: smooth with previous lookahead ---
+        if hasattr(self, 'prev_lookahead'):
+            lookahead_point_candidate = (
+                beta * self.prev_lookahead[0] + (1 - beta) * lookahead_point_candidate[0],
+                beta * self.prev_lookahead[1] + (1 - beta) * lookahead_point_candidate[1]
             )
 
-            # compute minimum perpendicular distance (relative to segment direction)
-            # between the candidate and any front obstacle (only obstacles < safety_dist)
-            min_perp_dist = float('inf')
-            for idx in front_idx:
-                r = self.scan.ranges[idx]
-                if r < 0.01 or r > safety_dist:
-                    continue
-                angle_rad = self.scan.angle_min + idx * self.scan.angle_increment
-                # If scan angles are in robot frame, and you have robot yaw (self.yaw),
-                # you may need: angle_world = angle_rad + self.yaw
-                angle_world = angle_rad  # adjust if necessary
-                obs_x = robot_pos[0] + r * math.cos(angle_world)
-                obs_y = robot_pos[1] + r * math.sin(angle_world)
-
-                # vector from candidate to obstacle
-                v_x = obs_x - candidate[0]
-                v_y = obs_y - candidate[1]
-
-                # perpendicular distance to segment direction = |v x seg_unit|
-                # cross product magnitude (since seg unit length = 1)
-                perp_dist = abs(v_x * seg_dy - v_y * seg_dx)
-                min_perp_dist = min(min_perp_dist, perp_dist)
-
-            # if no obstacle considered for this candidate, assume full clearance = safety_dist
-            if min_perp_dist == float('inf'):
-                min_perp_dist = safety_dist
-
-            # score: prefer large lateral clearance, penalize large lateral shifts
-            score = min_perp_dist - lateral_weight * abs(alpha)
-
-            if score > best_score:
-                best_score = score
-                best_point = candidate
-
-        # fallback
-        if best_point is None:
-            best_point = lookahead_point(self.full_path, robot_pos, self.lookahead_dist)
-
-        return best_point
-
-
+        self.prev_lookahead = lookahead_point_candidate
+        return lookahead_point_candidate
 
     # --- TODO: YOUR CODE HERE: controller used for TurtleBot ---
     def turtlebot_control(self, robot_pos: Coord, robot_h: float, target: Coord, dt: float, Ld: float) -> Tuple[float, float]:
