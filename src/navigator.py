@@ -709,14 +709,20 @@ class GridPathFollowerNode(Node):
         # --- FRONT-SECTOR READINGS ---
         # These index ranges depend on LiDAR configuration (assumes ~360 readings per revolution)
         # Adjust if your sensor has a different resolution or angle coverage.
-        left_idx = range(30, 45)     # ~+30° to +45°
-        right_idx = range(315, 330)    # ~-45° to -30°
-        front_idx = list(range(350, 360)) + list(range(0, 11))  # ~center (front zone)
+        left_idx = range(0, 45)     # ~+30° to +45°
+        right_idx = range(315, 360)    # ~-45° to -30°
+        front_idx = list(range(330, 360)) + list(range(0, 30))  # ~center (front zone)
 
         def avg_range(idxs):
             """Compute average distance for valid (finite) range values."""
             vals = [ranges[i] for i in idxs if math.isfinite(ranges[i])]
-            return sum(vals) / len(vals) if vals else float('inf')
+            if not vals:
+                return float('inf')  # no valid reading
+            r_min = min(vals)
+            r_avg = sum(vals) / len(vals)
+            w_min=0.5
+            return w_min * r_min + (1 - w_min) * r_avg
+
 
         avg_left = avg_range(left_idx)
         avg_right = avg_range(right_idx)
