@@ -346,11 +346,12 @@ class GridPathFollowerNode(Node):
         self.node_tol = 0.04
         # TODO: YOUR CODE HERE: ~3 lines: set the lookahead distance for pure-pursuit based control, and the maximum allowed linear and angular velocities 
         self.lookahead_dist = 0.55
-        self.v_max = 5.0
-        self.w_max = 5.0
+        self.v_max = 1.0
+        self.w_max = 3.0
         # ...
         # TODO: YOUR CODE HERE: ~1-2 lines: set your PID controller/s for linear/angular motion
-        self.pid_angular = PID(kp=0.8, ki=0.1, kd=0.05, i_limit=1.0)
+        self.pid_angular = PID(kp=1.75, ki=0.5, kd=1.0, i_limit=1.0)
+        self.pid_linear = PID(kp=1, ki=0.1, kd=1.0, i_limit=1.0)
 
         # --- Helpers to halt turtlebot ---
         self.dwell_s = 0.5
@@ -601,7 +602,7 @@ class GridPathFollowerNode(Node):
             return True
 
                 # --- Parameters ---
-        dist_thresh = 0.3
+        dist_thresh = 0.5
         min_corridor = 0.2
         robot_width = 0.178
         sector_half_angle = math.radians(30)
@@ -640,7 +641,7 @@ class GridPathFollowerNode(Node):
         # --- Obstacle detection ---
         hits = np.where(sector_ranges < dist_thresh)[0]
         if len(hits) == 0:
-            self.get_logger().info("No obstacles detected in sector — passable.")
+            # self.get_logger().info("No obstacles detected in sector — passable.")
             return True
 
         mid_idx = len(sector_ranges) // 2
@@ -648,7 +649,7 @@ class GridPathFollowerNode(Node):
         right_hits = hits[hits > mid_idx]
 
         if len(left_hits) == 0 or len(right_hits) == 0:
-            self.get_logger().info("Open space on one side — passable.")
+            # self.get_logger().info("Open space on one side — passable.")
             return True
 
         # --- Last hit on left, first hit on right ---
@@ -777,20 +778,41 @@ class GridPathFollowerNode(Node):
         w_cmd = self.pid_angular.update(heading_error, dt)
         w_cmd = np.clip(w_cmd, -self.w_max, self.w_max)
         
-        # Linear control - reduce speed when turning sharply
+        ## Linear control - reduce speed when turning sharply
         distance_to_target = math.dist(robot_pos, target)
-        v_base = min(self.v_max, distance_to_target * 0.5)  # Base speed
+        #v_base = min(self.v_max, distance_to_target * 0.5)  # Base speed
         
-        # Slow down when making sharp turns
-        turn_factor = 1.0 - min(1.0, abs(heading_error) / (math.pi/2))
-        v_cmd = v_base * turn_factor
+        ## Slow down when making sharp turns
+        #turn_factor = 1.0 - min(1.0, abs(heading_error) / (math.pi/2))
+        #v_cmd = v_base * turn_factor
         
-        # Further reduce speed if very close to target
-        if distance_to_target < 0.1:
-            v_cmd *= distance_to_target / 0.1
+        #if distance_to_target < 0.1:
+        #    v_cmd *= distance_to_target / 0.1
         
-        v_cmd = np.clip(v_cmd, 0.0, self.v_max)
+        #v_cmd = np.clip(v_cmd, 0.0, self.v_max)
         
+        #self.get_logger().info(
+        #    f"v_base={v_base:.2f}"
+        #    f"w_cmd={w_cmd:.2f}"
+        #    f"v_cmd={v_cmd:.2f}"
+        #    f"distance to target ={distance_to_target:.2f}"
+        #)
+
+        # Linear PID
+        v_pid = self.pid_linear.update(distance_to_target, dt)
+        v_pid = np.clip(v_pid, 0.0, self.v_max)
+
+        # Reduce linear speed slightly during sharp turns
+        turn_factor = 1.0 - min(1.0, abs(heading_error) / (math.pi / 2))
+        v_cmd = v_pid * turn_factor
+
+        if abs(heading_error) > math.radians(45):
+            v_cmd = 0.0  # stop forward motion
+
+        self.get_logger().info(
+            f"v_pid={v_pid:.2f} w_cmd={w_cmd:.2f} v_cmd={v_cmd:.2f} dist={distance_to_target:.2f}"
+        )
+
         return v_cmd, w_cmd
 
     # --- Publisher helpers ---
